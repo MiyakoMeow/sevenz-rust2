@@ -143,6 +143,9 @@ impl<R: Read> Read for Crc32VerifyingReader<R> {
 }
 
 impl Archive {
+    /// Opens a 7z archive asynchronously from a filesystem path using an empty password.
+    ///
+    /// Returns the parsed `Archive` metadata without decoding file contents.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_async(path: impl AsRef<std::path::Path>) -> Result<Archive, Error> {
         let data = afs::read(path.as_ref())
@@ -152,6 +155,9 @@ impl Archive {
         Self::read(&mut cursor, &Password::empty())
     }
 
+    /// Opens a 7z archive asynchronously from a filesystem path using the given password.
+    ///
+    /// Returns the parsed `Archive` metadata without decoding file contents.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_with_password_async(
         path: impl AsRef<std::path::Path>,
@@ -1141,6 +1147,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
     /// * `archive` - An existing parsed archive instance
     /// * `source` - The reader providing access to the archive data
     /// * `password` - Password for encrypted archives
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn from_archive(archive: Archive, source: R, password: Password) -> Self {
         let mut reader = Self {

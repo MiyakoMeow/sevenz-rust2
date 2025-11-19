@@ -123,10 +123,12 @@ fn compress_path<W: Write + Seek, P: AsRef<Path>>(
     let meta = block_on(afs::metadata(path)).map_err(|e| Error::io_msg(e, "error metadata"))?;
     if meta.is_dir() {
         archive_writer.push_archive_entry::<&[u8]>(entry, None)?;
-        let mut rd = block_on(afs::read_dir(path)).map_err(|e| Error::io_msg(e, "error read dir"))?;
+        let mut rd =
+            block_on(afs::read_dir(path)).map_err(|e| Error::io_msg(e, "error read dir"))?;
         while let Some(res) = block_on(rd.next()) {
             let dir = res.map_err(|e| Error::io_msg(e, "error read dir entry"))?;
-            let ftype = block_on(dir.file_type()).map_err(|e| Error::io_msg(e, "error file type"))?;
+            let ftype =
+                block_on(dir.file_type()).map_err(|e| Error::io_msg(e, "error file type"))?;
             if ftype.is_dir() || ftype.is_file() {
                 compress_path(dir.path(), root, archive_writer)?;
             }
