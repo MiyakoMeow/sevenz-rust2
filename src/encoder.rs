@@ -1,5 +1,10 @@
-use std::io::Write;
+use std::{
+    io::Write,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+use futures::io::AsyncWrite;
 use lzma_rust2::{
     Lzma2Writer, Lzma2WriterMt,
     filter::{bcj::BcjWriter, delta::DeltaWriter},
@@ -40,8 +45,10 @@ use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
 #[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 use futures::io::{AllowStdIo, AsyncWriteExt};
+#[cfg(not(any(feature = "deflate", feature = "bzip2", feature = "zstd")))]
+use futures::io::{AsyncWrite, AsyncWriteExt};
 
-pub(crate) enum Encoder<W: Write> {
+pub(crate) enum Encoder<W: AsyncWrite + Unpin> {
     Copy(CountingWriter<W>),
     Bcj(Option<BcjWriter<CountingWriter<W>>>),
     Delta(DeltaWriter<CountingWriter<W>>),
@@ -79,42 +86,36 @@ impl<W> StripLzmaHeaderWrite<W> {
     }
 }
 
-impl<W: futures::io::AsyncWrite + Unpin> futures::io::AsyncWrite for StripLzmaHeaderWrite<W> {
+impl<W: AsyncWrite + Unpin> AsyncWrite for StripLzmaHeaderWrite<W> {
     fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
+    ) -> Poll<std::io::Result<usize>> {
         let mut to_send = buf;
         if self.offset < 13 {
             let skip = 13 - self.offset;
             if to_send.len() <= skip {
                 self.offset += to_send.len();
-                return std::task::Poll::Ready(Ok(to_send.len()));
+                return Poll::Ready(Ok(to_send.len()));
             } else {
                 to_send = &to_send[skip..];
                 self.offset = 13;
             }
         }
-        std::pin::Pin::new(&mut self.inner).poll_write(cx, to_send)
+        Pin::new(&mut self.inner).poll_write(cx, to_send)
     }
 
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_close(cx)
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_close(cx)
     }
 }
 
-impl<W: Write> Write for Encoder<W> {
+impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Some encoder need to finish the encoding process. Because of lifetime limitations on
         // dynamic dispatch, we need to implement an implicit contract, where empty writes with
@@ -123,16 +124,16 @@ impl<W: Write> Write for Encoder<W> {
         // their data stream. Not a great way to do it, but I couldn't get a proper dynamic
         // dispatch based approach to work.
         match self {
-            Encoder::Copy(w) => w.write(buf),
+            Encoder::Copy(w) => std::io::Write::write(w, buf),
             Encoder::Delta(w) => w.write(buf),
             Encoder::Bcj(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    inner.write(buf)?;
+                    std::io::Write::write(&mut inner, buf)?;
                     Ok(0)
                 }
-                false => w.as_mut().unwrap().write(buf),
+                false => std::io::Write::write(w.as_mut().unwrap(), buf),
             },
             Encoder::Lzma(w) => match buf.is_empty() {
                 true => {
@@ -141,7 +142,7 @@ impl<W: Write> Write for Encoder<W> {
                     let strip = writer.into_inner();
                     let allow = strip.into_inner();
                     let mut inner = allow.into_inner();
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap(), buf)),
@@ -150,33 +151,33 @@ impl<W: Write> Write for Encoder<W> {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
-                false => w.as_mut().unwrap().write(buf),
+                false => std::io::Write::write(w.as_mut().unwrap(), buf),
             },
             Encoder::Lzma2Mt(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
-                false => w.as_mut().unwrap().write(buf),
+                false => std::io::Write::write(w.as_mut().unwrap(), buf),
             },
             #[cfg(feature = "ppmd")]
             Encoder::Ppmd(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish(false)?;
-                    let _ = inner.write(buf);
+                    let _ = Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => w.as_mut().unwrap().write(buf),
             },
             // TODO: Also add a proper "finish" method here.
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => w.write(buf),
+            Encoder::Brotli(w) => std::io::Write::write(w, buf),
             #[cfg(feature = "bzip2")]
             Encoder::Bzip2(w) => match buf.is_empty() {
                 true => {
@@ -184,7 +185,7 @@ impl<W: Write> Write for Encoder<W> {
                     async_io::block_on(writer.close())?;
                     let allow = writer.into_inner();
                     let mut inner = allow.into_inner();
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap(), buf)),
@@ -196,7 +197,7 @@ impl<W: Write> Write for Encoder<W> {
                     async_io::block_on(writer.close())?;
                     let allow = writer.into_inner();
                     let mut inner = allow.into_inner();
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap(), buf)),
@@ -206,7 +207,7 @@ impl<W: Write> Write for Encoder<W> {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => w.as_mut().unwrap().write(buf),
@@ -218,43 +219,62 @@ impl<W: Write> Write for Encoder<W> {
                     async_io::block_on(writer.close())?;
                     let allow = writer.into_inner();
                     let mut inner = allow.into_inner();
-                    let _ = inner.write(buf);
+                    let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
                 false => async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap(), buf)),
             },
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => w.write(buf),
+            Encoder::Aes(w) => std::io::Write::write(w, buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            Encoder::Copy(w) => w.flush(),
+            Encoder::Copy(w) => std::io::Write::flush(w),
             Encoder::Bcj(w) => w.as_mut().unwrap().flush(),
-            Encoder::Delta(w) => w.flush(),
+            Encoder::Delta(w) => std::io::Write::flush(w),
             Encoder::Lzma(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap())),
             Encoder::Lzma2(w) => w.as_mut().unwrap().flush(),
             Encoder::Lzma2Mt(w) => w.as_mut().unwrap().flush(),
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => w.flush(),
+            Encoder::Brotli(w) => std::io::Write::flush(w),
             #[cfg(feature = "ppmd")]
-            Encoder::Ppmd(w) => w.as_mut().unwrap().flush(),
+            Encoder::Ppmd(w) => std::io::Write::flush(w.as_mut().unwrap()),
             #[cfg(feature = "bzip2")]
             Encoder::Bzip2(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap())),
             #[cfg(feature = "deflate")]
             Encoder::Deflate(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap())),
             #[cfg(feature = "lz4")]
-            Encoder::Lz4(w) => w.as_mut().unwrap().flush(),
+            Encoder::Lz4(w) => std::io::Write::flush(w.as_mut().unwrap()),
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap())),
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => w.flush(),
+            Encoder::Aes(w) => std::io::Write::flush(w),
         }
     }
 }
 
-pub(crate) fn add_encoder<W: Write>(
+impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(std::io::Write::write(&mut self.as_mut().get_mut(), buf))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(std::io::Write::flush(&mut self.as_mut().get_mut()))
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let _ = std::io::Write::write(&mut self.as_mut().get_mut(), &[])?;
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
     input: CountingWriter<W>,
     method_config: &EncoderConfiguration,
 ) -> Result<Encoder<W>, Error> {

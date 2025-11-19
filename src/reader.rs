@@ -12,7 +12,12 @@ use crc32fast::Hasher;
 use lzma_rust2::filter::bcj2::Bcj2Reader;
 
 use crate::{
-    ByteReader, Password, archive::*, bitset::BitSet, block::*, decoder::add_decoder, error::Error,
+    ByteReader, Password,
+    archive::*,
+    bitset::BitSet,
+    block::*,
+    decoder::{AsyncStdRead, add_decoder},
+    error::Error,
 };
 
 const MAX_MEM_LIMIT_KB: usize = usize::MAX / 1024;
@@ -422,7 +427,7 @@ impl Archive {
                     ));
                 }
                 let next = add_decoder(
-                    decoder,
+                    AsyncStdRead::new(decoder),
                     block.get_unpack_size_at_index(index) as usize,
                     coder,
                     password,
@@ -1245,7 +1250,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
                 ));
             }
             let next = add_decoder(
-                decoder,
+                AsyncStdRead::new(decoder),
                 block.get_unpack_size_at_index(index) as usize,
                 coder,
                 password,
@@ -1422,7 +1427,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
             )?;
 
             let decoder = add_decoder(
-                input,
+                AsyncStdRead::new(input),
                 uncompressed_len,
                 coder,
                 password,

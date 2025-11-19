@@ -6,6 +6,7 @@ mod seq_reader;
 mod source_reader;
 mod unpack_info;
 
+use futures::io::{AllowStdIo, AsyncWrite, AsyncWriteExt};
 use std::{
     cell::Cell,
     io::{Read, Seek, Write},
@@ -63,7 +64,7 @@ macro_rules! write_times {
                         out.$write_fn((file.$time).into())?;
                     }
                 }
-                out.flush()?;
+                std::io::Write::flush(out)?;
                 write_u64(header, temp.len() as u64)?;
                 header.write_all(&temp)?;
             }
@@ -154,7 +155,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         if !entry.is_directory {
             if let Some(mut r) = reader {
                 let mut compressed_len = 0;
-                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+                let mut compressed =
+                    CompressWrapWriter::new(AllowStdIo::new(&mut self.output), &mut compressed_len);
 
                 let mut more_sizes: Vec<Rc<Cell<usize>>> =
                     Vec::with_capacity(self.content_methods.len() - 1);
@@ -174,7 +176,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                                 if n == 0 {
                                     break;
                                 }
-                                w.write_all(&buf[..n]).map_err(|e| {
+                                Write::write_all(&mut w, &buf[..n]).map_err(|e| {
                                     Error::io_msg(e, format!("Encode entry:{}", entry.name()))
                                 })?;
                             }
@@ -186,9 +188,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                             }
                         }
                     }
-                    w.flush()
+                    Write::flush(&mut w)
                         .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
-                    w.write(&[])
+                    Write::write(&mut w, &[])
                         .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
 
                     (w.crc_value(), write_len)
@@ -235,7 +237,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let mut r = SeqReader::new(reader);
         assert_eq!(r.reader_len(), entries.len());
         let mut compressed_len = 0;
-        let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+        let mut compressed =
+            CompressWrapWriter::new(AllowStdIo::new(&mut self.output), &mut compressed_len);
         let content_methods = &self.content_methods;
         let mut more_sizes: Vec<Rc<Cell<usize>>> = Vec::with_capacity(content_methods.len() - 1);
 
@@ -263,7 +266,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                         if n == 0 {
                             break;
                         }
-                        w.write_all(&buf[..n]).map_err(|e| {
+                        Write::write_all(&mut w, &buf[..n]).map_err(|e| {
                             Error::io_msg(e, format!("Encode entries:{}", entries_names(&entries)))
                         })?;
                     }
@@ -275,7 +278,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     }
                 }
             }
-            w.flush().map_err(|e| {
+            Write::flush(&mut w).map_err(|e| {
                 let mut names = String::with_capacity(512);
                 for ele in entries.iter() {
                     names.push_str(&ele.name);
@@ -286,7 +289,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 }
                 Error::io_msg(e, format!("Encode entry:{names}"))
             })?;
-            w.write(&[]).map_err(|e| {
+            Write::write(&mut w, &[]).map_err(|e| {
                 Error::io_msg(e, format!("Encode entry:{}", entries_names(&entries)))
             })?;
 
@@ -325,12 +328,12 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         Ok(self)
     }
 
-    fn create_writer<'a, O: Write + 'a>(
+    fn create_writer<'a, O: AsyncWrite + Unpin + 'a>(
         methods: &[EncoderConfiguration],
         out: O,
         more_sized: &mut Vec<Rc<Cell<usize>>>,
-    ) -> Result<Box<dyn Write + 'a>> {
-        let mut encoder: Box<dyn Write> = Box::new(out);
+    ) -> Result<Box<dyn AsyncWrite + Unpin + 'a>> {
+        let mut encoder: Box<dyn AsyncWrite + Unpin> = Box::new(out);
         let mut first = true;
         for mc in methods.iter() {
             if !first {
@@ -417,13 +420,14 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let mut encoded_data = Vec::with_capacity(size as usize / 2);
 
         let mut compress_size = 0;
-        let mut compressed = CompressWrapWriter::new(&mut encoded_data, &mut compress_size);
+        let mut compressed =
+            CompressWrapWriter::new(AllowStdIo::new(&mut encoded_data), &mut compress_size);
         {
             let mut encoder = Self::create_writer(&methods, &mut compressed, &mut more_sizes)
                 .map_err(std::io::Error::other)?;
-            encoder.write_all(&raw_header)?;
-            encoder.flush()?;
-            let _ = encoder.write(&[])?;
+            async_io::block_on(AsyncWriteExt::write_all(&mut encoder, &raw_header))?;
+            async_io::block_on(AsyncWriteExt::flush(&mut encoder))?;
+            let _ = async_io::block_on(AsyncWriteExt::write(&mut encoder, &[]))?;
         }
 
         let compress_crc = compressed.crc_value();
@@ -562,9 +566,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         for file in self.files.iter() {
             for c in file.name().encode_utf16() {
                 let buf = c.to_le_bytes();
-                out.write_all(&buf)?;
+                Write::write_all(out, &buf)?;
             }
-            out.write_all(&[0u8; 2])?;
+            Write::write_all(out, &[0u8; 2])?;
         }
         write_u64(header, temp.len() as u64)?;
         header.write_all(temp.as_slice())?;
@@ -628,7 +632,7 @@ struct CompressWrapWriter<'a, W> {
     bytes_written: &'a mut usize,
 }
 
-impl<'a, W: Write> CompressWrapWriter<'a, W> {
+impl<'a, W> CompressWrapWriter<'a, W> {
     pub fn new(writer: W, bytes_written: &'a mut usize) -> Self {
         Self {
             writer,
@@ -644,16 +648,47 @@ impl<'a, W: Write> CompressWrapWriter<'a, W> {
     }
 }
 
-impl<W: Write> Write for CompressWrapWriter<'_, W> {
+impl<W: AsyncWrite + Unpin> Write for CompressWrapWriter<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.cache.resize(buf.len(), Default::default());
-        let len = self.writer.write(buf)?;
+        let len = async_io::block_on(AsyncWriteExt::write(&mut self.writer, buf))?;
         self.crc.update(&buf[..len]);
         *self.bytes_written += len;
         Ok(len)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
+        async_io::block_on(AsyncWriteExt::flush(&mut self.writer))
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for CompressWrapWriter<'_, W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = &mut *self;
+        this.cache.resize(buf.len(), Default::default());
+        let poll = std::pin::Pin::new(&mut this.writer).poll_write(cx, buf);
+        if let std::task::Poll::Ready(Ok(len)) = &poll {
+            this.crc.update(&buf[..*len]);
+            *this.bytes_written += *len;
+        }
+        poll
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.writer).poll_close(cx)
     }
 }

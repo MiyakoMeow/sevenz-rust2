@@ -8,17 +8,17 @@ use std::pin::Pin;
 
 use crate::{Error, Password, *};
 
-struct AsyncReadSeekAsStd<R: AsyncRead + AsyncSeek + Unpin> {
+pub(crate) struct AsyncReadSeekAsStd<R: AsyncRead + Unpin> {
     inner: R,
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> AsyncReadSeekAsStd<R> {
-    fn new(inner: R) -> Self {
+impl<R: AsyncRead + Unpin> AsyncReadSeekAsStd<R> {
+    pub(crate) fn new(inner: R) -> Self {
         Self { inner }
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> Read for AsyncReadSeekAsStd<R> {
+impl<R: AsyncRead + Unpin> Read for AsyncReadSeekAsStd<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         async_io::block_on(AsyncReadExt::read(&mut self.inner, buf))
     }
