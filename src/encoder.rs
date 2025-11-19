@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use lzma_rust2::{
-    Lzma2Writer, Lzma2WriterMt, LzmaWriter,
+    Lzma2Writer, Lzma2WriterMt,
     filter::{bcj::BcjWriter, delta::DeltaWriter},
 };
 
@@ -37,6 +37,7 @@ use async_compression::futures::write::BzEncoder as AsyncBzip2Encoder;
 use async_compression::futures::write::DeflateEncoder as AsyncDeflateEncoder;
 #[cfg(feature = "zstd")]
 use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
+use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 #[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 use futures::io::{AllowStdIo, AsyncWriteExt};
 
@@ -44,7 +45,7 @@ pub(crate) enum Encoder<W: Write> {
     Copy(CountingWriter<W>),
     Bcj(Option<BcjWriter<CountingWriter<W>>>),
     Delta(DeltaWriter<CountingWriter<W>>),
-    Lzma(Option<LzmaWriter<CountingWriter<W>>>),
+    Lzma(Option<LzmaEnc<W>>),
     Lzma2(Option<Lzma2Writer<CountingWriter<W>>>),
     Lzma2Mt(Option<Lzma2WriterMt<CountingWriter<W>>>),
     #[cfg(feature = "ppmd")]
@@ -61,6 +62,56 @@ pub(crate) enum Encoder<W: Write> {
     Zstd(Option<AsyncZstdEncoder<AllowStdIo<CountingWriter<W>>>>),
     #[cfg(feature = "aes256")]
     Aes(Aes256Sha256Encoder<CountingWriter<W>>),
+}
+type LzmaEnc<W> = AsyncLzmaEncoder<StripLzmaHeaderWrite<AllowStdIo<CountingWriter<W>>>>;
+
+pub(crate) struct StripLzmaHeaderWrite<W> {
+    inner: W,
+    offset: usize,
+}
+
+impl<W> StripLzmaHeaderWrite<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, offset: 0 }
+    }
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: futures::io::AsyncWrite + Unpin> futures::io::AsyncWrite for StripLzmaHeaderWrite<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let mut to_send = buf;
+        if self.offset < 13 {
+            let skip = 13 - self.offset;
+            if to_send.len() <= skip {
+                self.offset += to_send.len();
+                return std::task::Poll::Ready(Ok(to_send.len()));
+            } else {
+                to_send = &to_send[skip..];
+                self.offset = 13;
+            }
+        }
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, to_send)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_close(cx)
+    }
 }
 
 impl<W: Write> Write for Encoder<W> {
@@ -85,12 +136,15 @@ impl<W: Write> Write for Encoder<W> {
             },
             Encoder::Lzma(w) => match buf.is_empty() {
                 true => {
-                    let writer = w.take().unwrap();
-                    let mut inner = writer.finish()?;
+                    let mut writer = w.take().unwrap();
+                    async_io::block_on(writer.close())?;
+                    let strip = writer.into_inner();
+                    let allow = strip.into_inner();
+                    let mut inner = allow.into_inner();
                     let _ = inner.write(buf);
                     Ok(0)
                 }
-                false => w.as_mut().unwrap().write(buf),
+                false => async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap(), buf)),
             },
             Encoder::Lzma2(w) => match buf.is_empty() {
                 true => {
@@ -179,7 +233,7 @@ impl<W: Write> Write for Encoder<W> {
             Encoder::Copy(w) => w.flush(),
             Encoder::Bcj(w) => w.as_mut().unwrap().flush(),
             Encoder::Delta(w) => w.flush(),
-            Encoder::Lzma(w) => w.as_mut().unwrap().flush(),
+            Encoder::Lzma(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap())),
             Encoder::Lzma2(w) => w.as_mut().unwrap().flush(),
             Encoder::Lzma2Mt(w) => w.as_mut().unwrap().flush(),
             #[cfg(feature = "brotli")]
@@ -227,12 +281,16 @@ pub(crate) fn add_encoder<W: Write>(
         EncoderMethod::ID_BCJ_PPC => Ok(Encoder::Bcj(Some(BcjWriter::new_ppc(input, 0)))),
         EncoderMethod::ID_BCJ_RISCV => Ok(Encoder::Bcj(Some(BcjWriter::new_riscv(input, 0)))),
         EncoderMethod::ID_LZMA => {
-            let options = match &method_config.options {
-                Some(EncoderOptions::Lzma(options)) => options.clone(),
-                _ => LzmaOptions::default(),
-            };
-            let lz = LzmaWriter::new_no_header(input, &options.0, false)?;
-            Ok(Encoder::Lzma(Some(lz)))
+            {
+                let _options = match &method_config.options {
+                    Some(EncoderOptions::Lzma(options)) => options.clone(),
+                    _ => LzmaOptions::default(),
+                };
+                let allow = AllowStdIo::new(input);
+                let strip = StripLzmaHeaderWrite::new(allow);
+                let enc = AsyncLzmaEncoder::new(strip);
+                Ok(Encoder::Lzma(Some(enc)))
+            }
         }
         EncoderMethod::ID_LZMA2 => {
             let lzma2_options = match &method_config.options {

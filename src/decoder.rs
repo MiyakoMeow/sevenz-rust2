@@ -6,10 +6,10 @@ use async_compression::futures::bufread::BzDecoder as AsyncBzip2Decoder;
 use async_compression::futures::bufread::DeflateDecoder as AsyncDeflateDecoder;
 #[cfg(feature = "zstd")]
 use async_compression::futures::bufread::ZstdDecoder as AsyncZstdDecoder;
-#[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
+use async_compression::futures::bufread::LzmaDecoder as AsyncLzmaDecoder;
 use futures::io::{AllowStdIo, AsyncReadExt};
 use lzma_rust2::{
-    Lzma2Reader, Lzma2ReaderMt, LzmaReader,
+    Lzma2Reader, Lzma2ReaderMt,
     filter::{bcj::BcjReader, delta::DeltaReader},
     lzma2_get_memory_usage,
 };
@@ -28,7 +28,18 @@ use crate::{ByteReader, Password, archive::EncoderMethod, block::Coder, error::E
 
 pub enum Decoder<R: Read> {
     Copy(R),
-    Lzma(Box<LzmaReader<R>>),
+    Lzma(
+        AsyncStdRead<
+            AsyncLzmaDecoder<
+                futures::io::BufReader<
+                    futures::io::Chain<
+                        AllowStdIo<std::io::Cursor<Vec<u8>>>,
+                        AllowStdIo<std::io::BufReader<R>>,
+                    >,
+                >,
+            >,
+        >,
+    ),
     Lzma2(Box<Lzma2Reader<R>>),
     Lzma2Mt(Box<Lzma2ReaderMt<R>>),
     #[cfg(feature = "ppmd")]
@@ -76,19 +87,16 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
-#[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 pub(crate) struct AsyncStdRead<D> {
     inner: D,
 }
 
-#[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 impl<D> AsyncStdRead<D> {
     fn new(inner: D) -> Self {
         Self { inner }
     }
 }
 
-#[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 impl<D: futures::io::AsyncRead + Unpin> Read for AsyncStdRead<D> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         async_io::block_on(self.inner.read(buf))
@@ -116,14 +124,21 @@ pub fn add_decoder<I: Read>(
         EncoderMethod::ID_COPY => Ok(Decoder::Copy(input)),
         EncoderMethod::ID_LZMA => {
             let dict_size = get_lzma_dic_size(coder)?;
-            if coder.properties.is_empty() {
+            if coder.properties.len() < 1 {
                 return Err(Error::Other("LZMA properties too short".into()));
             }
-            let props = coder.properties[0];
-            let lz =
-                LzmaReader::new_with_props(input, uncompressed_len as _, props, dict_size, None)
-                    .map_err(|e| Error::bad_password(e, !password.is_empty()))?;
-            Ok(Decoder::Lzma(Box::new(lz)))
+
+            let mut header = Vec::with_capacity(13);
+            header.push(coder.properties[0]);
+            header.extend_from_slice(&dict_size.to_le_bytes());
+            header.extend_from_slice(&(uncompressed_len as u64).to_le_bytes());
+
+            let header_cursor = AllowStdIo::new(std::io::Cursor::new(header));
+            let data_reader = AllowStdIo::new(std::io::BufReader::new(input));
+            let chained = AsyncReadExt::chain(header_cursor, data_reader);
+            let bufread = futures::io::BufReader::new(chained);
+            let de = AsyncLzmaDecoder::new(bufread);
+            Ok(Decoder::Lzma(AsyncStdRead::new(de)))
         }
         EncoderMethod::ID_LZMA2 => {
             let dic_size = get_lzma2_dic_size(coder)?;

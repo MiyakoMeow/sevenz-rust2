@@ -410,7 +410,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             }
         }
 
-        methods.push(EncoderConfiguration::new(EncoderMethod::LZMA));
+        methods.push(EncoderConfiguration::new(EncoderMethod::LZMA2));
 
         let methods = Arc::new(methods);
 

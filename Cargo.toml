@@ -43,7 +43,7 @@ sha2 = { version = "0.10", optional = true }
 async-fs = "2"
 futures-lite = "2"
 async-io = "2"
-async-compression = { version = "0.4", features = ["futures-io"] }
+async-compression = { version = "0.4", features = ["futures-io", "lzma"] }
 futures = "0.3"
 blocking = "1"
 
