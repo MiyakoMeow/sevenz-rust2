@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::io::AsyncWrite;
+// AsyncWrite is imported below together with AsyncWriteExt
 use lzma_rust2::{
     Lzma2Writer, Lzma2WriterMt,
     filter::{bcj::BcjWriter, delta::DeltaWriter},
@@ -43,9 +43,6 @@ use async_compression::futures::write::DeflateEncoder as AsyncDeflateEncoder;
 use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 #[cfg(feature = "zstd")]
 use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
-#[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
-use futures::io::{AllowStdIo, AsyncWriteExt};
-#[cfg(not(any(feature = "deflate", feature = "bzip2", feature = "zstd")))]
 use futures::io::{AsyncWrite, AsyncWriteExt};
 
 pub(crate) enum Encoder<W: AsyncWrite + Unpin> {
@@ -60,17 +57,17 @@ pub(crate) enum Encoder<W: AsyncWrite + Unpin> {
     #[cfg(feature = "brotli")]
     Brotli(BrotliEncoder<CountingWriter<W>>),
     #[cfg(feature = "bzip2")]
-    Bzip2(Option<AsyncBzip2Encoder<AllowStdIo<CountingWriter<W>>>>),
+    Bzip2(Option<AsyncBzip2Encoder<CountingWriter<W>>>),
     #[cfg(feature = "deflate")]
-    Deflate(Option<AsyncDeflateEncoder<AllowStdIo<CountingWriter<W>>>>),
+    Deflate(Option<AsyncDeflateEncoder<CountingWriter<W>>>),
     #[cfg(feature = "lz4")]
     Lz4(Option<Lz4Encoder<CountingWriter<W>>>),
     #[cfg(feature = "zstd")]
-    Zstd(Option<AsyncZstdEncoder<AllowStdIo<CountingWriter<W>>>>),
+    Zstd(Option<AsyncZstdEncoder<CountingWriter<W>>>),
     #[cfg(feature = "aes256")]
     Aes(Aes256Sha256Encoder<CountingWriter<W>>),
 }
-type LzmaEnc<W> = AsyncLzmaEncoder<StripLzmaHeaderWrite<AllowStdIo<CountingWriter<W>>>>;
+type LzmaEnc<W> = AsyncLzmaEncoder<StripLzmaHeaderWrite<CountingWriter<W>>>;
 
 pub(crate) struct StripLzmaHeaderWrite<W> {
     inner: W,
@@ -140,8 +137,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                     let mut writer = w.take().unwrap();
                     async_io::block_on(writer.close())?;
                     let strip = writer.into_inner();
-                    let allow = strip.into_inner();
-                    let mut inner = allow.into_inner();
+                    let mut inner = strip.into_inner();
                     let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
@@ -183,8 +179,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                 true => {
                     let mut writer = w.take().unwrap();
                     async_io::block_on(writer.close())?;
-                    let allow = writer.into_inner();
-                    let mut inner = allow.into_inner();
+                    let mut inner = writer.into_inner();
                     let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
@@ -195,8 +190,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                 true => {
                     let mut writer = w.take().unwrap();
                     async_io::block_on(writer.close())?;
-                    let allow = writer.into_inner();
-                    let mut inner = allow.into_inner();
+                    let mut inner = writer.into_inner();
                     let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
@@ -217,8 +211,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                 true => {
                     let mut writer = w.take().unwrap();
                     async_io::block_on(writer.close())?;
-                    let allow = writer.into_inner();
-                    let mut inner = allow.into_inner();
+                    let mut inner = writer.into_inner();
                     let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
@@ -305,8 +298,7 @@ pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
                 Some(EncoderOptions::Lzma(options)) => options.clone(),
                 _ => LzmaOptions::default(),
             };
-            let allow = AllowStdIo::new(input);
-            let strip = StripLzmaHeaderWrite::new(allow);
+            let strip = StripLzmaHeaderWrite::new(input);
             let enc = AsyncLzmaEncoder::new(strip);
             Ok(Encoder::Lzma(Some(enc)))
         }
@@ -366,8 +358,7 @@ pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
                 _ => Bzip2Options::default(),
             };
             let level = Level::Precise(options.0 as i32);
-            let allow = AllowStdIo::new(input);
-            let bzip2_encoder = AsyncBzip2Encoder::with_quality(allow, level);
+            let bzip2_encoder = AsyncBzip2Encoder::with_quality(input, level);
             Ok(Encoder::Bzip2(Some(bzip2_encoder)))
         }
         #[cfg(feature = "deflate")]
@@ -377,8 +368,7 @@ pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
                 _ => DeflateOptions::default(),
             };
             let level = Level::Precise(options.0 as i32);
-            let allow = AllowStdIo::new(input);
-            let deflate_encoder = AsyncDeflateEncoder::with_quality(allow, level);
+            let deflate_encoder = AsyncDeflateEncoder::with_quality(input, level);
             Ok(Encoder::Deflate(Some(deflate_encoder)))
         }
         #[cfg(feature = "lz4")]
@@ -399,8 +389,7 @@ pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
                 _ => ZstandardOptions::default(),
             };
             let level = Level::Precise(options.0 as i32);
-            let allow = AllowStdIo::new(input);
-            let zstd_encoder = AsyncZstdEncoder::with_quality(allow, level);
+            let zstd_encoder = AsyncZstdEncoder::with_quality(input, level);
             Ok(Encoder::Zstd(Some(zstd_encoder)))
         }
         #[cfg(feature = "aes256")]

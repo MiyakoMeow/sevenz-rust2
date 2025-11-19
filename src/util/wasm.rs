@@ -1,3 +1,5 @@
+use async_io::block_on;
+use futures::io::{AsyncReadExt, AsyncSeekExt};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use js_sys::*;
@@ -16,11 +18,14 @@ use crate::*;
 /// * `f` - JavaScript callback function to handle extracted entries
 #[wasm_bindgen]
 pub fn decompress(src: Uint8Array, pwd: &str, f: &Function) -> Result<(), String> {
-    let mut src_reader = Uint8ArrayStream::new(src);
-    let pos = src_reader.stream_position().map_err(|e| e.to_string())?;
-    src_reader
-        .seek(SeekFrom::Start(pos))
-        .map_err(|e| e.to_string())?;
+    let mut src_reader = sevenz_rust2::AsyncStdReadSeek::new(Uint8ArrayStream::new(src));
+    let pos =
+        block_on(AsyncSeekExt::stream_position(&mut src_reader)).map_err(|e| e.to_string())?;
+    block_on(AsyncSeekExt::seek(
+        &mut src_reader,
+        futures::io::SeekFrom::Start(pos),
+    ))
+    .map_err(|e| e.to_string())?;
     let mut seven =
         ArchiveReader::new(src_reader, Password::from(pwd)).map_err(|e| e.to_string())?;
     seven
@@ -30,7 +35,8 @@ pub fn decompress(src: Uint8Array, pwd: &str, f: &Function) -> Result<(), String
 
                 if entry.size() > 0 {
                     let mut writer = Vec::new();
-                    std::io::copy(reader, &mut writer)?;
+                    block_on(AsyncReadExt::read_to_end(reader, &mut writer))
+                        .map_err(|e| e.to_string())?;
                     let _ = f.call2(
                         &JsValue::NULL,
                         &JsValue::from(path),
@@ -55,12 +61,12 @@ pub fn decompress(src: Uint8Array, pwd: &str, f: &Function) -> Result<(), String
 #[wasm_bindgen]
 pub fn compress(entries: Vec<JsString>, datas: Vec<Uint8Array>) -> Result<Uint8Array, String> {
     let output = Uint8Array::new_with_length(32);
-    let writer = Uint8ArrayStream::new(output);
+    let writer = sevenz_rust2::StdWriteSeekAsAsync::new(Uint8ArrayStream::new(output));
 
     let mut sz = ArchiveWriter::new(writer).map_err(|e| e.to_string())?;
     let reader: Vec<SourceReader<_>> = datas
         .into_iter()
-        .map(|d| Uint8ArrayStream::new(d))
+        .map(|d| sevenz_rust2::AsyncStdReadSeek::new(Uint8ArrayStream::new(d)))
         .map(SourceReader::new)
         .collect();
     let entries = entries
@@ -76,7 +82,7 @@ pub fn compress(entries: Vec<JsString>, datas: Vec<Uint8Array>) -> Result<Uint8A
         .map_err(|e| e.to_string())?;
     let out = sz.finish().map_err(|e| e.to_string())?;
 
-    Ok(out.data)
+    Ok(out.into_inner().data)
 }
 
 struct Uint8ArrayStream {
