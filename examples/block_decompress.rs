@@ -27,7 +27,7 @@ fn main() {
                 if entry.name() == my_file_name {
                     //only extract the file we want
                     let dest = dest.join(entry.name());
-                    sevenz_rust2::default_entry_extract_fn(entry, reader, &dest)?;
+                    sevenz_rust2::default_entry_extract_fn_async(entry, reader, &dest)?;
                 } else {
                     //skip other files
                     std::io::copy(reader, &mut std::io::sink())?;

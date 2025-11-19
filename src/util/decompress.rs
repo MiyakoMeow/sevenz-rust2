@@ -1,12 +1,8 @@
-#[cfg(target_os = "macos")]
-use std::os::macos::fs::FileTimesExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileTimesExt;
-use std::{
-    fs::FileTimes,
-    io::{Read, Seek},
-    path::{Path, PathBuf},
-};
+use std::io::{Read, Seek};
+use std::path::{Path, PathBuf};
+
+use async_fs as afs;
+use async_io::block_on;
 
 use crate::{Error, Password, *};
 
@@ -17,10 +13,18 @@ use crate::{Error, Password, *};
 /// # Arguments
 /// * `src_path` - Path to the source archive file
 /// * `dest` - Path to the destination directory where files will be extracted
-pub fn decompress_file(src_path: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<(), Error> {
-    let file = std::fs::File::open(src_path.as_ref())
-        .map_err(|e| Error::file_open(e, src_path.as_ref().to_string_lossy().to_string()))?;
-    decompress(file, dest)
+pub async fn decompress_file(
+    src_path: impl AsRef<Path>,
+    dest: impl AsRef<Path>,
+) -> Result<(), Error> {
+    let dest_path = dest.as_ref().to_path_buf();
+    decompress_path_impl_async(
+        src_path.as_ref(),
+        dest_path,
+        Password::empty(),
+        default_entry_extract_fn_async,
+    )
+    .await
 }
 
 /// Decompresses an archive file to a destination directory with a custom extraction function.
@@ -32,14 +36,18 @@ pub fn decompress_file(src_path: impl AsRef<Path>, dest: impl AsRef<Path>) -> Re
 /// * `src_path` - Path to the source archive file
 /// * `dest` - Path to the destination directory where files will be extracted
 /// * `extract_fn` - Custom function to handle each archive entry during extraction
-pub fn decompress_file_with_extract_fn(
+pub async fn decompress_file_with_extract_fn(
     src_path: impl AsRef<Path>,
     dest: impl AsRef<Path>,
-    extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
 ) -> Result<(), Error> {
-    let file = std::fs::File::open(src_path.as_ref())
-        .map_err(|e| Error::file_open(e, src_path.as_ref().to_string_lossy().to_string()))?;
-    decompress_with_extract_fn(file, dest, extract_fn)
+    decompress_path_impl_async(
+        src_path.as_ref(),
+        dest.as_ref().to_path_buf(),
+        Password::empty(),
+        move |entry, reader, path| extract_fn(entry, reader, path),
+    )
+    .await
 }
 
 /// Decompresses an archive from a reader to a destination directory.
@@ -47,8 +55,17 @@ pub fn decompress_file_with_extract_fn(
 /// # Arguments
 /// * `src_reader` - Reader containing the archive data
 /// * `dest` - Path to the destination directory where files will be extracted
-pub fn decompress<R: Read + Seek>(src_reader: R, dest: impl AsRef<Path>) -> Result<(), Error> {
-    decompress_with_extract_fn(src_reader, dest, default_entry_extract_fn)
+pub async fn decompress<R: Read + Seek>(
+    src_reader: R,
+    dest: impl AsRef<Path>,
+) -> Result<(), Error> {
+    decompress_impl_async(
+        src_reader,
+        dest,
+        Password::empty(),
+        default_entry_extract_fn_async,
+    )
+    .await
 }
 
 /// Decompresses an archive from a reader to a destination directory with a custom extraction function.
@@ -60,12 +77,12 @@ pub fn decompress<R: Read + Seek>(src_reader: R, dest: impl AsRef<Path>) -> Resu
 /// * `dest` - Path to the destination directory where files will be extracted
 /// * `extract_fn` - Custom function to handle each archive entry during extraction
 #[cfg(not(target_arch = "wasm32"))]
-pub fn decompress_with_extract_fn<R: Read + Seek>(
+pub async fn decompress_with_extract_fn<R: Read + Seek>(
     src_reader: R,
     dest: impl AsRef<Path>,
     extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
 ) -> Result<(), Error> {
-    decompress_impl(src_reader, dest, Password::empty(), extract_fn)
+    decompress_impl_async(src_reader, dest, Password::empty(), extract_fn).await
 }
 
 /// Decompresses an encrypted archive file with the given password.
@@ -75,14 +92,19 @@ pub fn decompress_with_extract_fn<R: Read + Seek>(
 /// * `dest` - Path to the destination directory where files will be extracted
 /// * `password` - Password to decrypt the archive
 #[cfg(all(feature = "aes256", not(target_arch = "wasm32")))]
-pub fn decompress_file_with_password(
+pub async fn decompress_file_with_password(
     src_path: impl AsRef<Path>,
     dest: impl AsRef<Path>,
     password: Password,
 ) -> Result<(), Error> {
-    let file = std::fs::File::open(src_path.as_ref())
-        .map_err(|e| Error::file_open(e, src_path.as_ref().to_string_lossy().to_string()))?;
-    decompress_with_password(file, dest, password)
+    let dest_path = dest.as_ref().to_path_buf();
+    decompress_path_impl_async(
+        src_path.as_ref(),
+        dest_path,
+        password,
+        default_entry_extract_fn_async,
+    )
+    .await
 }
 
 /// Decompresses an encrypted archive from a reader with the given password.
@@ -92,12 +114,12 @@ pub fn decompress_file_with_password(
 /// * `dest` - Path to the destination directory where files will be extracted
 /// * `password` - Password to decrypt the archive
 #[cfg(all(feature = "aes256", not(target_arch = "wasm32")))]
-pub fn decompress_with_password<R: Read + Seek>(
+pub async fn decompress_with_password<R: Read + Seek>(
     src_reader: R,
     dest: impl AsRef<Path>,
     password: Password,
 ) -> Result<(), Error> {
-    decompress_impl(src_reader, dest, password, default_entry_extract_fn)
+    decompress_impl_async(src_reader, dest, password, default_entry_extract_fn_async).await
 }
 
 /// Decompresses an encrypted archive from a reader with a custom extraction function and password.
@@ -111,17 +133,17 @@ pub fn decompress_with_password<R: Read + Seek>(
 /// * `password` - Password to decrypt the archive
 /// * `extract_fn` - Custom function to handle each archive entry during extraction
 #[cfg(all(feature = "aes256", not(target_arch = "wasm32")))]
-pub fn decompress_with_extract_fn_and_password<R: Read + Seek>(
+pub async fn decompress_with_extract_fn_and_password<R: Read + Seek>(
     src_reader: R,
     dest: impl AsRef<Path>,
     password: Password,
     extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
 ) -> Result<(), Error> {
-    decompress_impl(src_reader, dest, password, extract_fn)
+    decompress_impl_async(src_reader, dest, password, extract_fn).await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn decompress_impl<R: Read + Seek>(
+async fn decompress_impl_async<R: Read + Seek>(
     mut src_reader: R,
     dest: impl AsRef<Path>,
     password: Password,
@@ -134,13 +156,31 @@ fn decompress_impl<R: Read + Seek>(
     let mut seven = ArchiveReader::new(src_reader, password)?;
     let dest = PathBuf::from(dest.as_ref());
     if !dest.exists() {
-        std::fs::create_dir_all(&dest)?;
+        afs::create_dir_all(&dest).await?;
     }
     seven.for_each_entries(|entry, reader| {
         let dest_path = dest.join(entry.name());
         extract_fn(entry, reader, &dest_path)
     })?;
 
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn decompress_path_impl_async(
+    src_path: &Path,
+    dest: PathBuf,
+    password: Password,
+    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+) -> Result<(), Error> {
+    let mut seven = ArchiveReader::open(src_path, password)?;
+    if !dest.exists() {
+        afs::create_dir_all(&dest).await?;
+    }
+    seven.for_each_entries(|entry, reader| {
+        let dest_path = dest.join(entry.name());
+        extract_fn(entry, reader, &dest_path)
+    })?;
     Ok(())
 }
 
@@ -151,42 +191,26 @@ fn decompress_impl<R: Read + Seek>(
 /// * `reader` - Reader for the entry's data
 /// * `dest` - Destination path for the entry
 #[cfg(not(target_arch = "wasm32"))]
-pub fn default_entry_extract_fn(
+pub fn default_entry_extract_fn_async(
     entry: &ArchiveEntry,
     reader: &mut dyn Read,
     dest: &PathBuf,
 ) -> Result<bool, Error> {
-    use std::{fs::File, io::BufWriter};
-
     if entry.is_directory() {
-        let dir = dest;
-        if !dir.exists() {
-            std::fs::create_dir_all(dir)?;
-        }
+        let dir = dest.clone();
+        block_on(afs::create_dir_all(&dir))?;
     } else {
-        let path = dest;
-        path.parent().and_then(|p| {
+        let path = dest.clone();
+        if let Some(p) = path.parent() {
             if !p.exists() {
-                std::fs::create_dir_all(p).ok()
-            } else {
-                None
+                block_on(afs::create_dir_all(p))?;
             }
-        });
-        let file = File::create(path)
+        }
+        let file = std::fs::File::create(&path)
             .map_err(|e| Error::file_open(e, path.to_string_lossy().to_string()))?;
         if entry.size() > 0 {
-            let mut writer = BufWriter::new(file);
+            let mut writer = std::io::BufWriter::new(file);
             std::io::copy(reader, &mut writer)?;
-
-            let file = writer.get_mut();
-            let file_times = FileTimes::new()
-                .set_accessed(entry.access_date().into())
-                .set_modified(entry.last_modified_date().into());
-
-            #[cfg(any(windows, target_os = "macos"))]
-            let file_times = file_times.set_created(entry.creation_date().into());
-
-            let _ = file.set_times(file_times);
         }
     }
 

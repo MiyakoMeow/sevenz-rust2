@@ -10,6 +10,7 @@ use sevenz_rust2::encoder_options::*;
 #[cfg(all(feature = "compress", feature = "util"))]
 use sevenz_rust2::*;
 #[cfg(all(feature = "compress", feature = "util"))]
+#[cfg(all(feature = "compress", feature = "util"))]
 use tempfile::*;
 
 #[cfg(all(feature = "compress", feature = "util"))]
@@ -19,10 +20,10 @@ fn compress_empty_file() {
     let source = temp_dir.path().join("empty.txt");
     File::create(&source).unwrap();
     let dest = temp_dir.path().join("empty.7z");
-    compress_to_path(source, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(source, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     let decompress_file = decompress_dest.join("empty.txt");
     assert!(decompress_file.exists());
@@ -37,10 +38,10 @@ fn compress_one_file_with_content() {
     let source = temp_dir.path().join("file1.txt");
     std::fs::write(&source, "file1 with content").unwrap();
     let dest = temp_dir.path().join("file1.7z");
-    compress_to_path(source, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(source, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     let decompress_file = decompress_dest.join("file1.txt");
     assert!(decompress_file.exists());
@@ -58,10 +59,10 @@ fn compress_empty_folder() {
     let folder = temp_dir.path().join("folder");
     std::fs::create_dir(&folder).unwrap();
     let dest = temp_dir.path().join("folder.7z");
-    compress_to_path(&folder, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(&folder, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     assert!(decompress_dest.read_dir().unwrap().next().is_none());
 }
@@ -74,10 +75,10 @@ fn compress_folder_with_one_file() {
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(folder.join("file1.txt"), "file1 with content").unwrap();
     let dest = temp_dir.path().join("folder.7z");
-    compress_to_path(&folder, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(&folder, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     let decompress_file = decompress_dest.join("file1.txt");
     assert!(decompress_file.exists());
@@ -104,10 +105,10 @@ fn compress_folder_with_multi_file() {
         contents.push(content);
     }
     let dest = temp_dir.path().join("folder.7z");
-    compress_to_path(&folder, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(&folder, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     for i in 0..files.len() {
         let name = &files[i];
@@ -127,10 +128,10 @@ fn compress_folder_with_nested_folder() {
     std::fs::create_dir_all(&inner).unwrap();
     std::fs::write(inner.join("file1.txt"), "file1 with content").unwrap();
     let dest = temp_dir.path().join("folder.7z");
-    compress_to_path(&folder, &dest).expect("compress ok");
+    smol::block_on(compress_to_path(&folder, &dest)).expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     let decompress_file = decompress_dest.join("a/b/c/file1.txt");
     assert!(decompress_file.exists());
@@ -158,11 +159,16 @@ fn compress_one_file_with_random_content_encrypted() {
         std::fs::write(&source, &content).unwrap();
         let dest = temp_dir.path().join("file1.7z");
 
-        compress_to_path_encrypted(source, &dest, "rust".into()).expect("compress ok");
+        smol::block_on(compress_to_path_encrypted(source, &dest, "rust".into()))
+            .expect("compress ok");
 
         let decompress_dest = temp_dir.path().join("decompress");
-        decompress_file_with_password(dest, &decompress_dest, "rust".into())
-            .expect("decompress ok");
+        smol::block_on(decompress_file_with_password(
+            dest,
+            &decompress_dest,
+            "rust".into(),
+        ))
+        .expect("decompress ok");
         assert!(decompress_dest.exists());
         let decompress_file = decompress_dest.join("file1.txt");
         assert!(decompress_file.exists());

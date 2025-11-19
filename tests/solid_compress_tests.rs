@@ -1,6 +1,7 @@
 #[cfg(feature = "compress")]
 use sevenz_rust2::*;
 #[cfg(feature = "compress")]
+#[cfg(feature = "compress")]
 use tempfile::*;
 
 #[cfg(feature = "compress")]
@@ -25,7 +26,7 @@ fn compress_multi_files_solid() {
     sz.finish().expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     for i in 0..files.len() {
         let name = &files[i];
@@ -79,7 +80,7 @@ fn compress_multi_files_mix_solid_and_non_solid() {
     sz.finish().expect("compress ok");
 
     let decompress_dest = temp_dir.path().join("decompress");
-    decompress_file(dest, &decompress_dest).expect("decompress ok");
+    smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
     assert!(decompress_dest.exists());
     for i in 0..files.len() {
         let name = &files[i];

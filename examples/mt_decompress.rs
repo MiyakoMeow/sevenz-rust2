@@ -40,7 +40,7 @@ fn main() {
             block_decoder
                 .for_each_entries(&mut |entry, reader| {
                     let dest = dest.join(entry.name());
-                    sevenz_rust2::default_entry_extract_fn(entry, reader, &dest)?;
+                    sevenz_rust2::default_entry_extract_fn_async(entry, reader, &dest)?;
                     Ok(true)
                 })
                 .expect("ok");

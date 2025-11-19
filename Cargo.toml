@@ -42,6 +42,10 @@ lz4_flex = { version = "0.12", optional = true }
 nt-time = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 zstd = { version = "0.13", optional = true }
+async-fs = "2.2.0"
+futures-lite = "2.6.1"
+async-io = "2.6.0"
+async-compression = "0.4.33"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -49,6 +53,7 @@ wasm-bindgen = "0.2"
 
 [dev-dependencies]
 rand = { version = "0.9" }
+smol = "2.0.2"
 tempfile = "3"
 
 [[example]]

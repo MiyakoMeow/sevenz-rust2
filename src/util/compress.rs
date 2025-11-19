@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use async_fs as afs;
+
 #[cfg(feature = "aes256")]
 use crate::encoder_options::AesEncoderOptions;
 use crate::{ArchiveEntry, ArchiveWriter, EncoderMethod, Error, Password, writer::LazyFileReader};
@@ -61,18 +63,17 @@ pub fn compress_encrypted<W: Write + Seek>(
 /// # Arguments
 /// * `src` - Path to the source file or directory to compress
 /// * `dest` - Path where the compressed archive will be created
-pub fn compress_to_path(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<(), Error> {
+pub async fn compress_to_path(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<(), Error> {
     if let Some(path) = dest.as_ref().parent() {
         if !path.exists() {
-            std::fs::create_dir_all(path)
+            afs::create_dir_all(path)
+                .await
                 .map_err(|e| Error::io_msg(e, format!("Create dir failed:{:?}", dest.as_ref())))?;
         }
     }
-    compress(
-        src,
-        File::create(dest.as_ref())
-            .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?,
-    )?;
+    let stdf = File::create(dest.as_ref())
+        .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?;
+    compress(src, stdf)?;
     Ok(())
 }
 
@@ -85,23 +86,21 @@ pub fn compress_to_path(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result
 /// * `dest` - Path where the encrypted compressed archive will be created
 /// * `password` - Password to encrypt the archive with
 #[cfg(feature = "aes256")]
-pub fn compress_to_path_encrypted(
+pub async fn compress_to_path_encrypted(
     src: impl AsRef<Path>,
     dest: impl AsRef<Path>,
     password: Password,
 ) -> Result<(), Error> {
     if let Some(path) = dest.as_ref().parent() {
         if !path.exists() {
-            std::fs::create_dir_all(path)
+            afs::create_dir_all(path)
+                .await
                 .map_err(|e| Error::io_msg(e, format!("Create dir failed:{:?}", dest.as_ref())))?;
         }
     }
-    compress_encrypted(
-        src,
-        File::create(dest.as_ref())
-            .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?,
-        password,
-    )?;
+    let stdf = File::create(dest.as_ref())
+        .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?;
+    compress_encrypted(src, stdf, password)?;
     Ok(())
 }
 
