@@ -303,6 +303,7 @@ version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680dc087785c5230f8e8843e2e57ac7c1c90488b6a91b88caa265410568f441b"
 dependencies = [
+ "brotli",
  "bzip2",
  "compression-core",
  "deflate64",
@@ -907,7 +908,6 @@ dependencies = [
  "async-fs",
  "async-io",
  "blocking",
- "brotli",
  "cbc",
  "crc32fast",
  "futures",

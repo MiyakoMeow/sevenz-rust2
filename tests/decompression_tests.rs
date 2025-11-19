@@ -225,7 +225,7 @@ fn decompress_zstdmt_lz4_file() {
     let mut license_path = target.clone();
     license_path.push("LICENSE");
 
-    decompress_file(source_file, target).unwrap();
+    smol::block_on(decompress_file(source_file, target)).unwrap();
 
     assert!(
         read_to_string(license_path)

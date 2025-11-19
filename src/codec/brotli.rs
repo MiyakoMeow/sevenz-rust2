@@ -3,6 +3,13 @@ use std::io::{self, Write};
 use std::io::{Cursor, Read};
 
 use crate::{ByteReader, Error};
+use async_compression::futures::bufread::BrotliDecoder as AsyncBrotliDecoder;
+#[cfg(feature = "compress")]
+use async_compression::futures::write::BrotliEncoder as AsyncBrotliEncoder;
+#[cfg(feature = "compress")]
+use futures::io::AsyncWriteExt;
+use futures::io::BufReader as AsyncBufReader;
+use futures::io::{AllowStdIo, AsyncReadExt};
 
 /// Magic bytes of a skippable frame format as used in brotli by zstdmt.
 const SKIPPABLE_FRAME_MAGIC: u32 = 0x184D2A50;
@@ -14,7 +21,7 @@ const HINT_UNIT_SIZE: usize = 65536;
 /// Custom decoder to support the custom format first implemented by zstdmt, which allows to have
 /// optional skippable frames.
 pub(crate) struct BrotliDecoder<R: Read> {
-    inner: Option<brotli::Decompressor<InnerReader<R>>>,
+    inner: Option<AsyncBrotliDecoder<AsyncBufReader<AllowStdIo<InnerReader<R>>>>>,
     buffer_size: usize,
 }
 
@@ -48,7 +55,9 @@ impl<R: Read> BrotliDecoder<R> {
             InnerReader::new_standard(input, header[..header_read].to_vec())
         };
 
-        let decompressor = brotli::Decompressor::new(inner_reader, buffer_size);
+        let allow = AllowStdIo::new(inner_reader);
+        let bufread = AsyncBufReader::new(allow);
+        let decompressor = AsyncBrotliDecoder::new(bufread);
 
         Ok(BrotliDecoder {
             inner: Some(decompressor),
@@ -60,14 +69,18 @@ impl<R: Read> BrotliDecoder<R> {
 impl<R: Read> Read for BrotliDecoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(inner) = &mut self.inner {
-            match inner.read(buf) {
+            match async_io::block_on(AsyncReadExt::read(inner, buf)) {
                 Ok(0) => {
-                    let inner_reader = inner.get_mut();
+                    let bufreader = inner.get_mut();
+                    let allow = bufreader.get_mut();
+                    let inner_reader = allow.get_mut();
 
                     if inner_reader.read_next_frame_header()? {
                         let reader = std::mem::replace(inner_reader, InnerReader::empty());
-                        let mut decompressor = brotli::Decompressor::new(reader, self.buffer_size);
-                        let result = decompressor.read(buf);
+                        let allow = AllowStdIo::new(reader);
+                        let bufread = AsyncBufReader::new(allow);
+                        let mut decompressor = AsyncBrotliDecoder::new(bufread);
+                        let result = async_io::block_on(AsyncReadExt::read(&mut decompressor, buf));
                         self.inner = Some(decompressor);
                         result
                     } else {
@@ -222,10 +235,10 @@ pub(crate) struct BrotliEncoder<W: Write> {
 
 #[cfg(feature = "compress")]
 enum InnerWriter<W: Write> {
-    Standard(brotli::CompressorWriter<W>),
+    Standard(AsyncBrotliEncoder<AllowStdIo<W>>),
     Framed {
         writer: W,
-        compressor: Option<brotli::CompressorWriter<Vec<u8>>>,
+        compressor: Option<AsyncBrotliEncoder<AllowStdIo<std::io::Cursor<Vec<u8>>>>>,
         frame_size: usize,
         uncompressed_bytes_in_frame: usize,
     },
@@ -242,14 +255,18 @@ impl<W: Write> BrotliEncoder<W> {
         let buffer_size = 8192;
 
         let inner = if frame_size == 0 {
-            let compressor = brotli::CompressorWriter::new(writer, buffer_size, quality, window);
+            let allow = AllowStdIo::new(writer);
+            let compressor = AsyncBrotliEncoder::with_quality(
+                allow,
+                async_compression::Level::Precise(quality as i32),
+            );
             InnerWriter::Standard(compressor)
         } else {
-            let compressor = Some(brotli::CompressorWriter::new(
-                Vec::with_capacity(frame_size),
-                buffer_size,
-                quality,
-                window,
+            let cursor = std::io::Cursor::new(Vec::with_capacity(frame_size));
+            let allow = AllowStdIo::new(cursor);
+            let compressor = Some(AsyncBrotliEncoder::with_quality(
+                allow,
+                async_compression::Level::Precise(quality as i32),
             ));
             InnerWriter::Framed {
                 writer,
@@ -302,7 +319,9 @@ impl<W: Write> BrotliEncoder<W> {
 impl<W: Write> Write for BrotliEncoder<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match &mut self.inner {
-            InnerWriter::Standard(compressor) => compressor.write(buf),
+            InnerWriter::Standard(compressor) => {
+                async_io::block_on(AsyncWriteExt::write(compressor, buf))
+            }
             InnerWriter::Framed {
                 writer,
                 compressor,
@@ -320,7 +339,7 @@ impl<W: Write> Write for BrotliEncoder<W> {
                         bytes_consumed + (*frame_size - *uncompressed_bytes_in_frame),
                     );
                     let chunk = &buf[bytes_consumed..end];
-                    let bytes_written = comp.write(chunk)?;
+                    let bytes_written = async_io::block_on(AsyncWriteExt::write(comp, chunk))?;
 
                     if bytes_written == 0 && !chunk.is_empty() {
                         return Err(io::Error::new(
@@ -334,17 +353,18 @@ impl<W: Write> Write for BrotliEncoder<W> {
 
                     if *uncompressed_bytes_in_frame >= *frame_size {
                         let mut comp = compressor.take().expect("no compressor set");
-                        comp.flush()?;
-                        let mut data = comp.into_inner();
+                        async_io::block_on(comp.close())?;
+                        let allow = comp.into_inner();
+                        let cursor = allow.into_inner();
+                        let data = cursor.into_inner();
 
                         Self::write_frame(writer, &data, *uncompressed_bytes_in_frame)?;
-                        data.clear();
 
-                        *compressor = Some(brotli::CompressorWriter::new(
-                            data,
-                            self.buffer_size,
-                            self.quality,
-                            self.window,
+                        let new_cursor = std::io::Cursor::new(Vec::with_capacity(*frame_size));
+                        let allow = AllowStdIo::new(new_cursor);
+                        *compressor = Some(AsyncBrotliEncoder::with_quality(
+                            allow,
+                            async_compression::Level::Precise(self.quality as i32),
                         ));
 
                         *uncompressed_bytes_in_frame = 0;
@@ -358,28 +378,31 @@ impl<W: Write> Write for BrotliEncoder<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.inner {
-            InnerWriter::Standard(compressor) => compressor.flush(),
+            InnerWriter::Standard(compressor) => {
+                async_io::block_on(AsyncWriteExt::flush(compressor))
+            }
             InnerWriter::Framed {
                 writer,
                 compressor,
+                frame_size,
                 uncompressed_bytes_in_frame,
-                ..
             } => {
                 let mut comp = compressor.take().expect("no compressor set");
-                comp.flush()?;
-                let mut data = comp.into_inner();
+                async_io::block_on(comp.close())?;
+                let allow = comp.into_inner();
+                let cursor = allow.into_inner();
+                let data = cursor.into_inner();
 
                 if !data.is_empty() {
                     Self::write_frame(writer, &data, *uncompressed_bytes_in_frame)?;
-                    data.clear();
                     *uncompressed_bytes_in_frame = 0;
                 }
 
-                *compressor = Some(brotli::CompressorWriter::new(
-                    data,
-                    self.buffer_size,
-                    self.quality,
-                    self.window,
+                let new_cursor = std::io::Cursor::new(Vec::with_capacity(*frame_size));
+                let allow = AllowStdIo::new(new_cursor);
+                *compressor = Some(AsyncBrotliEncoder::with_quality(
+                    allow,
+                    async_compression::Level::Precise(self.quality as i32),
                 ));
 
                 writer.flush()

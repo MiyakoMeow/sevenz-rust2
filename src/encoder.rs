@@ -33,6 +33,10 @@ use crate::{
 use async_compression::Level;
 #[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 use async_compression::futures::write::BzEncoder as AsyncBzip2Encoder;
+#[cfg(feature = "deflate")]
+use async_compression::futures::write::DeflateEncoder as AsyncDeflateEncoder;
+#[cfg(feature = "zstd")]
+use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
 #[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 use futures::io::{AllowStdIo, AsyncWriteExt};
 
@@ -387,7 +391,7 @@ pub(crate) fn get_options_as_properties<'a>(
         }
         #[cfg(feature = "brotli")]
         EncoderMethod::ID_BROTLI => {
-            let version_major = brotli::VERSION;
+            let version_major = 1;
             let version_minor = 0;
             let options = match options {
                 Some(EncoderOptions::Brotli(options)) => *options,
