@@ -23,7 +23,7 @@ brotli = ["async-compression/brotli"]
 bzip2 = ["async-compression/bzip2"]
 compress = ["lzma-rust2/encoder"]
 deflate = ["async-compression/deflate", "async-compression/deflate64"]
-lz4 = ["dep:lz4_flex"]
+lz4 = ["async-compression/lz4"]
 ppmd = ["dep:ppmd-rust"]
 util = []
 zstd = ["async-compression/zstd"]
@@ -38,7 +38,6 @@ lzma-rust2 = { version = "0.15", default-features = false, features = [
     "optimization",
 ] }
 ppmd-rust = { version = "1", optional = true }
-lz4_flex = { version = "0.12", optional = true }
 nt-time = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 async-fs = "2"

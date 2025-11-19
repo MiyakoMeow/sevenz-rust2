@@ -2,9 +2,12 @@
 use std::io::Write;
 use std::io::{Cursor, Read};
 
-use lz4_flex::frame::{FrameDecoder, FrameEncoder, FrameInfo};
-
 use crate::{ByteReader, ByteWriter, Error};
+use async_compression::futures::bufread::Lz4Decoder as AsyncLz4Decoder;
+#[cfg(feature = "compress")]
+use async_compression::futures::write::Lz4Encoder as AsyncLz4Encoder;
+use futures::io::BufReader as AsyncBufReader;
+use futures::io::{AllowStdIo, AsyncReadExt, AsyncWriteExt};
 
 /// Magic bytes of a skippable frame as used in LZ4 by zstdmt.
 const SKIPPABLE_FRAME_MAGIC: u32 = 0x184D2A50;
@@ -12,7 +15,7 @@ const SKIPPABLE_FRAME_MAGIC: u32 = 0x184D2A50;
 /// Custom decoder to support the custom format first implemented by zstdmt, which allows to have
 /// optional skippable frames.
 pub(crate) struct Lz4Decoder<R: Read> {
-    inner: Option<FrameDecoder<InnerReader<R>>>,
+    inner: Option<AsyncLz4Decoder<AsyncBufReader<AllowStdIo<InnerReader<R>>>>>,
 }
 
 impl<R: Read> Lz4Decoder<R> {
@@ -40,7 +43,9 @@ impl<R: Read> Lz4Decoder<R> {
             InnerReader::new_standard(input, header[..header_read].to_vec())
         };
 
-        let decoder = FrameDecoder::new(inner_reader);
+        let allow = AllowStdIo::new(inner_reader);
+        let bufread = AsyncBufReader::new(allow);
+        let decoder = AsyncLz4Decoder::new(bufread);
 
         Ok(Lz4Decoder {
             inner: Some(decoder),
@@ -51,14 +56,18 @@ impl<R: Read> Lz4Decoder<R> {
 impl<R: Read> Read for Lz4Decoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if let Some(inner) = &mut self.inner {
-            match inner.read(buf) {
+            match async_io::block_on(AsyncReadExt::read(inner, buf)) {
                 Ok(0) => {
-                    let inner_reader = inner.get_mut();
+                    let bufreader = inner.get_mut();
+                    let allow = bufreader.get_mut();
+                    let inner_reader = allow.get_mut();
 
                     if inner_reader.read_next_frame_header()? {
                         let reader = std::mem::replace(inner_reader, InnerReader::empty());
-                        let mut deencoder = FrameDecoder::new(reader);
-                        let result = deencoder.read(buf);
+                        let allow = AllowStdIo::new(reader);
+                        let bufread = AsyncBufReader::new(allow);
+                        let mut deencoder = AsyncLz4Decoder::new(bufread);
+                        let result = async_io::block_on(AsyncReadExt::read(&mut deencoder, buf));
                         self.inner = Some(deencoder);
                         result
                     } else {
@@ -203,7 +212,7 @@ pub(crate) struct Lz4Encoder<W: Write> {
 
 #[cfg(feature = "compress")]
 enum InnerWriter<W: Write> {
-    Standard(FrameEncoder<W>),
+    Standard(AsyncLz4Encoder<AllowStdIo<W>>),
     Framed {
         writer: W,
         frame_size: usize,
@@ -217,7 +226,8 @@ enum InnerWriter<W: Write> {
 impl<W: Write> Lz4Encoder<W> {
     pub(crate) fn new(writer: W, frame_size: usize) -> Result<Self, Error> {
         let inner = if frame_size == 0 {
-            let encoder = FrameEncoder::new(writer);
+            let allow = AllowStdIo::new(writer);
+            let encoder = AsyncLz4Encoder::new(allow);
             InnerWriter::Standard(encoder)
         } else {
             InnerWriter::Framed {
@@ -242,27 +252,34 @@ impl<W: Write> Lz4Encoder<W> {
         }
         compressed_data.clear();
 
-        // zstdmt expects that the content size is set when using skippable frames with LZ4.
-        let frame_info = FrameInfo::default().content_size(Some(uncompressed_data.len() as u64));
-        let mut frame_encoder = FrameEncoder::with_frame_info(frame_info, compressed_data);
-        frame_encoder.write_all(uncompressed_data)?;
-        let compressed_data = frame_encoder.finish()?;
+        let cursor = std::io::Cursor::new(Vec::new());
+        let allow = AllowStdIo::new(cursor);
+        let mut enc = AsyncLz4Encoder::new(allow);
+        async_io::block_on(AsyncWriteExt::write_all(&mut enc, uncompressed_data))?;
+        async_io::block_on(enc.close())?;
+        let allow = enc.into_inner();
+        let cursor = allow.into_inner();
+        let data = cursor.into_inner();
 
-        if compressed_data.is_empty() {
+        if data.is_empty() {
             return Ok(());
         }
 
         writer.write_u32(SKIPPABLE_FRAME_MAGIC)?;
         writer.write_u32(4)?;
-        writer.write_u32(compressed_data.len() as u32)?;
-        writer.write_all(compressed_data.as_slice())?;
+        writer.write_u32(data.len() as u32)?;
+        writer.write_all(data.as_slice())?;
 
         Ok(())
     }
 
     pub fn finish(self) -> std::io::Result<W> {
         match self.inner {
-            InnerWriter::Standard(encoder) => Ok(encoder.finish()?),
+            InnerWriter::Standard(mut encoder) => {
+                async_io::block_on(AsyncWriteExt::flush(&mut encoder))?;
+                let allow = encoder.into_inner();
+                Ok(allow.into_inner())
+            }
             InnerWriter::Framed {
                 mut writer,
                 mut compressed_data,
@@ -285,7 +302,9 @@ impl<W: Write> Lz4Encoder<W> {
 impl<W: Write> Write for Lz4Encoder<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match &mut self.inner {
-            InnerWriter::Standard(encoder) => encoder.write(buf),
+            InnerWriter::Standard(encoder) => {
+                async_io::block_on(AsyncWriteExt::write(encoder, buf))
+            }
             InnerWriter::Framed {
                 writer,
                 frame_size,
@@ -325,7 +344,7 @@ impl<W: Write> Write for Lz4Encoder<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match &mut self.inner {
-            InnerWriter::Standard(encoder) => encoder.flush(),
+            InnerWriter::Standard(encoder) => async_io::block_on(AsyncWriteExt::flush(encoder)),
             InnerWriter::Framed {
                 writer,
                 compressed_data,
