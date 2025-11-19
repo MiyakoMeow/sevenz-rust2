@@ -59,15 +59,13 @@ fn main() {
 
     if solid {
         for file_path in &file_paths {
-            writer
-                .push_source_path(file_path, |_| true)
+            smol::block_on(writer.push_source_path(file_path, |_| true))
                 .expect("Failed to push source path");
             println!("Added path: {file_path}");
         }
     } else {
         for file_path in &file_paths {
-            writer
-                .push_source_path_non_solid(file_path, |_| true)
+            smol::block_on(writer.push_source_path_non_solid(file_path, |_| true))
                 .expect("Failed to push source path");
             println!("Added path: {file_path}");
         }

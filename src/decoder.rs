@@ -4,9 +4,9 @@ use std::{io, io::Read};
 use async_compression::futures::bufread::BzDecoder as AsyncBzip2Decoder;
 #[cfg(feature = "deflate")]
 use async_compression::futures::bufread::DeflateDecoder as AsyncDeflateDecoder;
+use async_compression::futures::bufread::LzmaDecoder as AsyncLzmaDecoder;
 #[cfg(feature = "zstd")]
 use async_compression::futures::bufread::ZstdDecoder as AsyncZstdDecoder;
-use async_compression::futures::bufread::LzmaDecoder as AsyncLzmaDecoder;
 use futures::io::{AllowStdIo, AsyncReadExt};
 use lzma_rust2::{
     Lzma2Reader, Lzma2ReaderMt,

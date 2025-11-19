@@ -35,9 +35,9 @@ use async_compression::Level;
 use async_compression::futures::write::BzEncoder as AsyncBzip2Encoder;
 #[cfg(feature = "deflate")]
 use async_compression::futures::write::DeflateEncoder as AsyncDeflateEncoder;
+use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 #[cfg(feature = "zstd")]
 use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
-use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 #[cfg(any(feature = "deflate", feature = "bzip2", feature = "zstd"))]
 use futures::io::{AllowStdIo, AsyncWriteExt};
 
@@ -281,16 +281,14 @@ pub(crate) fn add_encoder<W: Write>(
         EncoderMethod::ID_BCJ_PPC => Ok(Encoder::Bcj(Some(BcjWriter::new_ppc(input, 0)))),
         EncoderMethod::ID_BCJ_RISCV => Ok(Encoder::Bcj(Some(BcjWriter::new_riscv(input, 0)))),
         EncoderMethod::ID_LZMA => {
-            {
-                let _options = match &method_config.options {
-                    Some(EncoderOptions::Lzma(options)) => options.clone(),
-                    _ => LzmaOptions::default(),
-                };
-                let allow = AllowStdIo::new(input);
-                let strip = StripLzmaHeaderWrite::new(allow);
-                let enc = AsyncLzmaEncoder::new(strip);
-                Ok(Encoder::Lzma(Some(enc)))
-            }
+            let _options = match &method_config.options {
+                Some(EncoderOptions::Lzma(options)) => options.clone(),
+                _ => LzmaOptions::default(),
+            };
+            let allow = AllowStdIo::new(input);
+            let strip = StripLzmaHeaderWrite::new(allow);
+            let enc = AsyncLzmaEncoder::new(strip);
+            Ok(Encoder::Lzma(Some(enc)))
         }
         EncoderMethod::ID_LZMA2 => {
             let lzma2_options = match &method_config.options {

@@ -6,7 +6,6 @@ use std::{
 };
 
 use async_fs as afs;
-use async_io::block_on;
 use futures_lite::StreamExt;
 
 #[cfg(feature = "aes256")]
@@ -18,14 +17,14 @@ use crate::{ArchiveEntry, ArchiveWriter, EncoderMethod, Error, Password, writer:
 /// # Arguments
 /// * `src` - Path to the source file or directory to compress
 /// * `dest` - Writer that implements `Write + Seek` to write the compressed archive to
-pub fn compress<W: Write + Seek>(src: impl AsRef<Path>, dest: W) -> Result<W, Error> {
+pub async fn compress<W: Write + Seek>(src: impl AsRef<Path>, dest: W) -> Result<W, Error> {
     let mut archive_writer = ArchiveWriter::new(dest)?;
     let parent = if src.as_ref().is_dir() {
         src.as_ref()
     } else {
         src.as_ref().parent().unwrap_or(src.as_ref())
     };
-    compress_path(src.as_ref(), parent, &mut archive_writer)?;
+    compress_path(src.as_ref(), parent, &mut archive_writer).await?;
     Ok(archive_writer.finish()?)
 }
 
@@ -36,7 +35,7 @@ pub fn compress<W: Write + Seek>(src: impl AsRef<Path>, dest: W) -> Result<W, Er
 /// * `dest` - Writer that implements `Write + Seek` to write the compressed archive to
 /// * `password` - Password to encrypt the archive with
 #[cfg(feature = "aes256")]
-pub fn compress_encrypted<W: Write + Seek>(
+pub async fn compress_encrypted<W: Write + Seek>(
     src: impl AsRef<Path>,
     dest: W,
     password: Password,
@@ -53,7 +52,7 @@ pub fn compress_encrypted<W: Write + Seek>(
     } else {
         src.as_ref().parent().unwrap_or(src.as_ref())
     };
-    compress_path(src.as_ref(), parent, &mut archive_writer)?;
+    compress_path(src.as_ref(), parent, &mut archive_writer).await?;
     Ok(archive_writer.finish()?)
 }
 
@@ -73,7 +72,7 @@ pub async fn compress_to_path(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> 
         }
     }
     let cursor = std::io::Cursor::new(Vec::<u8>::new());
-    let cursor = compress(src, cursor)?;
+    let cursor = compress(src, cursor).await?;
     let data = cursor.into_inner();
     afs::write(dest.as_ref(), data).await?;
     Ok(())
@@ -101,44 +100,50 @@ pub async fn compress_to_path_encrypted(
         }
     }
     let cursor = std::io::Cursor::new(Vec::<u8>::new());
-    let cursor = compress_encrypted(src, cursor, password)?;
+    let cursor = compress_encrypted(src, cursor, password).await?;
     let data = cursor.into_inner();
     afs::write(dest.as_ref(), data).await?;
     Ok(())
 }
 
-fn compress_path<W: Write + Seek, P: AsRef<Path>>(
+async fn compress_path<W: Write + Seek, P: AsRef<Path>>(
     src: P,
     root: &Path,
     archive_writer: &mut ArchiveWriter<W>,
 ) -> Result<(), Error> {
-    let entry_name = src
-        .as_ref()
-        .strip_prefix(root)
-        .map_err(|e| Error::other(e.to_string()))?
-        .to_string_lossy()
-        .to_string();
-    let entry = ArchiveEntry::from_path(src.as_ref(), entry_name);
-    let path = src.as_ref();
-    let meta = block_on(afs::metadata(path)).map_err(|e| Error::io_msg(e, "error metadata"))?;
-    if meta.is_dir() {
-        archive_writer.push_archive_entry::<&[u8]>(entry, None)?;
-        let mut rd =
-            block_on(afs::read_dir(path)).map_err(|e| Error::io_msg(e, "error read dir"))?;
-        while let Some(res) = block_on(rd.next()) {
-            let dir = res.map_err(|e| Error::io_msg(e, "error read dir entry"))?;
-            let ftype =
-                block_on(dir.file_type()).map_err(|e| Error::io_msg(e, "error file type"))?;
-            if ftype.is_dir() || ftype.is_file() {
-                compress_path(dir.path(), root, archive_writer)?;
+    let mut stack: Vec<PathBuf> = vec![src.as_ref().to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entry_name = path
+            .strip_prefix(root)
+            .map_err(|e| Error::other(e.to_string()))?
+            .to_string_lossy()
+            .to_string();
+        let entry = ArchiveEntry::from_path(path.as_path(), entry_name);
+        let meta = afs::metadata(&path)
+            .await
+            .map_err(|e| Error::io_msg(e, "error metadata"))?;
+        if meta.is_dir() {
+            archive_writer.push_archive_entry::<&[u8]>(entry, None)?;
+            let mut rd = afs::read_dir(&path)
+                .await
+                .map_err(|e| Error::io_msg(e, "error read dir"))?;
+            while let Some(res) = rd.next().await {
+                let dir = res.map_err(|e| Error::io_msg(e, "error read dir entry"))?;
+                let ftype = dir
+                    .file_type()
+                    .await
+                    .map_err(|e| Error::io_msg(e, "error file type"))?;
+                if ftype.is_dir() || ftype.is_file() {
+                    stack.push(dir.path());
+                }
             }
+        } else {
+            archive_writer
+                .push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
+                    entry,
+                    Some(LazyFileReader::new(path.clone()).into()),
+                )?;
         }
-    } else {
-        archive_writer
-            .push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
-                entry,
-                Some(LazyFileReader::new(path.to_path_buf()).into()),
-            )?;
     }
     Ok(())
 }
@@ -152,13 +157,13 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// # Arguments
     /// * `path` - Path to add to the compression
     /// * `filter` - Function that returns `true` for paths that should be included
-    pub fn push_source_path(
+    pub async fn push_source_path(
         &mut self,
         path: impl AsRef<Path>,
         filter: impl Fn(&Path) -> bool,
-    ) -> Result<&mut Self, Error> {
-        encode_path(true, &path, self, filter)?;
-        Ok(self)
+    ) -> Result<(), Error> {
+        encode_path(true, &path, self, filter).await?;
+        Ok(())
     }
 
     /// Adds a source path to the compression builder with a filter function using non-solid compression.
@@ -169,44 +174,46 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// # Arguments
     /// * `path` - Path to add to the compression
     /// * `filter` - Function that returns `true` for paths that should be included
-    pub fn push_source_path_non_solid(
+    pub async fn push_source_path_non_solid(
         &mut self,
         path: impl AsRef<Path>,
         filter: impl Fn(&Path) -> bool,
-    ) -> Result<&mut Self, Error> {
-        encode_path(false, &path, self, filter)?;
-        Ok(self)
+    ) -> Result<(), Error> {
+        encode_path(false, &path, self, filter).await?;
+        Ok(())
     }
 }
 
-fn collect_file_paths(
+async fn collect_file_paths(
     src: impl AsRef<Path>,
     paths: &mut Vec<PathBuf>,
     filter: &dyn Fn(&Path) -> bool,
 ) -> std::io::Result<()> {
-    let path = src.as_ref();
-    if !filter(path) {
-        return Ok(());
-    }
-    let meta = block_on(afs::metadata(path))?;
-    if meta.is_dir() {
-        let mut rd = block_on(afs::read_dir(path))?;
-        while let Some(res) = block_on(rd.next()) {
-            let dir = res?;
-            let ftype = block_on(dir.file_type())?;
-            if ftype.is_file() || ftype.is_dir() {
-                collect_file_paths(dir.path(), paths, filter)?;
-            }
+    let mut stack: Vec<PathBuf> = vec![src.as_ref().to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if !filter(&path) {
+            continue;
         }
-    } else {
-        paths.push(path.to_path_buf())
+        let meta = afs::metadata(&path).await?;
+        if meta.is_dir() {
+            let mut rd = afs::read_dir(&path).await?;
+            while let Some(res) = rd.next().await {
+                let dir = res?;
+                let ftype = dir.file_type().await?;
+                if ftype.is_file() || ftype.is_dir() {
+                    stack.push(dir.path());
+                }
+            }
+        } else {
+            paths.push(path);
+        }
     }
     Ok(())
 }
 
 const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-fn encode_path<W: Write + Seek>(
+async fn encode_path<W: Write + Seek>(
     solid: bool,
     src: impl AsRef<Path>,
     zip: &mut ArchiveWriter<W>,
@@ -214,12 +221,14 @@ fn encode_path<W: Write + Seek>(
 ) -> Result<(), Error> {
     let mut entries = Vec::new();
     let mut paths = Vec::new();
-    collect_file_paths(&src, &mut paths, &filter).map_err(|e| {
-        Error::io_msg(
-            e,
-            format!("Failed to collect entries from path:{:?}", src.as_ref()),
-        )
-    })?;
+    collect_file_paths(&src, &mut paths, &filter)
+        .await
+        .map_err(|e| {
+            Error::io_msg(
+                e,
+                format!("Failed to collect entries from path:{:?}", src.as_ref()),
+            )
+        })?;
 
     if !solid {
         for ele in paths.into_iter() {
@@ -235,7 +244,7 @@ fn encode_path<W: Write + Seek>(
     let mut files = Vec::new();
     let mut file_size = 0;
     for ele in paths.into_iter() {
-        let size = block_on(afs::metadata(&ele))?.len();
+        let size = afs::metadata(&ele).await?.len();
         let name = extract_file_name(&src, &ele)?;
 
         if size >= MAX_BLOCK_SIZE {
