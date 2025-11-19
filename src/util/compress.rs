@@ -1,7 +1,6 @@
 //! 7z Compressor helper functions
 
 use std::{
-    fs::File,
     io::{Seek, Write},
     path::{Path, PathBuf},
 };
@@ -71,9 +70,10 @@ pub async fn compress_to_path(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> 
                 .map_err(|e| Error::io_msg(e, format!("Create dir failed:{:?}", dest.as_ref())))?;
         }
     }
-    let stdf = File::create(dest.as_ref())
-        .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?;
-    compress(src, stdf)?;
+    let cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let cursor = compress(src, cursor)?;
+    let data = cursor.into_inner();
+    afs::write(dest.as_ref(), data).await?;
     Ok(())
 }
 
@@ -98,9 +98,10 @@ pub async fn compress_to_path_encrypted(
                 .map_err(|e| Error::io_msg(e, format!("Create dir failed:{:?}", dest.as_ref())))?;
         }
     }
-    let stdf = File::create(dest.as_ref())
-        .map_err(|e| Error::file_open(e, dest.as_ref().to_string_lossy().to_string()))?;
-    compress_encrypted(src, stdf, password)?;
+    let cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let cursor = compress_encrypted(src, cursor, password)?;
+    let data = cursor.into_inner();
+    afs::write(dest.as_ref(), data).await?;
     Ok(())
 }
 
@@ -130,13 +131,11 @@ fn compress_path<W: Write + Seek, P: AsRef<Path>>(
             }
         }
     } else {
-        archive_writer.push_archive_entry(
-            entry,
-            Some(
-                File::open(path)
-                    .map_err(|e| Error::file_open(e, path.to_string_lossy().to_string()))?,
-            ),
-        )?;
+        archive_writer
+            .push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
+                entry,
+                Some(LazyFileReader::new(path.to_path_buf()).into()),
+            )?;
     }
     Ok(())
 }
@@ -221,9 +220,9 @@ fn encode_path<W: Write + Seek>(
         for ele in paths.into_iter() {
             let name = extract_file_name(&src, &ele)?;
 
-            zip.push_archive_entry(
+            zip.push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
                 ArchiveEntry::from_path(ele.as_path(), name),
-                Some(File::open(ele.as_path())?),
+                Some(LazyFileReader::new(ele.clone()).into()),
             )?;
         }
         return Ok(());
@@ -235,9 +234,9 @@ fn encode_path<W: Write + Seek>(
         let name = extract_file_name(&src, &ele)?;
 
         if size >= MAX_BLOCK_SIZE {
-            zip.push_archive_entry(
+            zip.push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
                 ArchiveEntry::from_path(ele.as_path(), name),
-                Some(File::open(ele.as_path())?),
+                Some(LazyFileReader::new(ele.clone()).into()),
             )?;
             continue;
         }

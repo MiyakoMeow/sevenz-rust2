@@ -206,11 +206,13 @@ pub fn default_entry_extract_fn_async(
                 block_on(afs::create_dir_all(p))?;
             }
         }
-        let file = std::fs::File::create(&path)
-            .map_err(|e| Error::file_open(e, path.to_string_lossy().to_string()))?;
         if entry.size() > 0 {
-            let mut writer = std::io::BufWriter::new(file);
-            std::io::copy(reader, &mut writer)?;
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(reader, &mut data)
+                .map_err(|e| Error::io_msg(e, "read entry data"))?;
+            block_on(afs::write(&path, &data))?;
+        } else {
+            block_on(afs::File::create(&path))?;
         }
     }
 
