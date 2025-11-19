@@ -6,6 +6,8 @@ use std::{
 };
 
 use async_fs as afs;
+use async_io::block_on;
+use futures_lite::StreamExt;
 
 #[cfg(feature = "aes256")]
 use crate::encoder_options::AesEncoderOptions;
@@ -118,14 +120,13 @@ fn compress_path<W: Write + Seek, P: AsRef<Path>>(
         .to_string();
     let entry = ArchiveEntry::from_path(src.as_ref(), entry_name);
     let path = src.as_ref();
-    if path.is_dir() {
+    let meta = block_on(afs::metadata(path)).map_err(|e| Error::io_msg(e, "error metadata"))?;
+    if meta.is_dir() {
         archive_writer.push_archive_entry::<&[u8]>(entry, None)?;
-        for dir in path
-            .read_dir()
-            .map_err(|e| Error::io_msg(e, "error read dir"))?
-        {
-            let dir = dir?;
-            let ftype = dir.file_type()?;
+        let mut rd = block_on(afs::read_dir(path)).map_err(|e| Error::io_msg(e, "error read dir"))?;
+        while let Some(res) = block_on(rd.next()) {
+            let dir = res.map_err(|e| Error::io_msg(e, "error read dir entry"))?;
+            let ftype = block_on(dir.file_type()).map_err(|e| Error::io_msg(e, "error file type"))?;
             if ftype.is_dir() || ftype.is_file() {
                 compress_path(dir.path(), root, archive_writer)?;
             }
@@ -185,10 +186,12 @@ fn collect_file_paths(
     if !filter(path) {
         return Ok(());
     }
-    if path.is_dir() {
-        for dir in path.read_dir()? {
-            let dir = dir?;
-            let ftype = dir.file_type()?;
+    let meta = block_on(afs::metadata(path))?;
+    if meta.is_dir() {
+        let mut rd = block_on(afs::read_dir(path))?;
+        while let Some(res) = block_on(rd.next()) {
+            let dir = res?;
+            let ftype = block_on(dir.file_type())?;
             if ftype.is_file() || ftype.is_dir() {
                 collect_file_paths(dir.path(), paths, filter)?;
             }
@@ -230,7 +233,7 @@ fn encode_path<W: Write + Seek>(
     let mut files = Vec::new();
     let mut file_size = 0;
     for ele in paths.into_iter() {
-        let size = ele.metadata()?.len();
+        let size = block_on(afs::metadata(&ele))?.len();
         let name = extract_file_name(&src, &ele)?;
 
         if size >= MAX_BLOCK_SIZE {

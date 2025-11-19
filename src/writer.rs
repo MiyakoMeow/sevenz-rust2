@@ -12,8 +12,6 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::{fs::File, path::Path};
 
 pub(crate) use counting_writer::CountingWriter;
 use crc32fast::Hasher;
@@ -87,12 +85,11 @@ pub struct ArchiveWriter<W: Write> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl ArchiveWriter<File> {
-    /// Creates a file to write a 7z archive to.
-    pub(crate) fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::create(path.as_ref())
-            .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
-        Self::new(file)
+impl ArchiveWriter<std::io::Cursor<Vec<u8>>> {
+    /// Creates an in-memory buffer to write a 7z archive to.
+    pub fn create_in_memory() -> Result<Self> {
+        let cursor = std::io::Cursor::new(Vec::<u8>::new());
+        Self::new(cursor)
     }
 }
 

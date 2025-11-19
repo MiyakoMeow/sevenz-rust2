@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fs::File,
     io,
     io::{Read, Seek, SeekFrom},
     num::NonZeroUsize,
@@ -144,26 +143,6 @@ impl<R: Read> Read for Crc32VerifyingReader<R> {
 }
 
 impl Archive {
-    /// Open 7z file under specified `path`.
-    #[inline]
-    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Result<Archive, Error> {
-        Self::open_with_password(path, &Password::empty())
-    }
-
-    /// Open an encrypted 7z file under specified `path` with `password`.
-    ///
-    /// # Parameters
-    /// - `reader`   - the path to the 7z file
-    /// - `password` - archive password encoded in utf16 little endian
-    #[inline]
-    pub(crate) fn open_with_password(
-        path: impl AsRef<std::path::Path>,
-        password: &Password,
-    ) -> Result<Archive, Error> {
-        let mut file = File::open(path)?;
-        Self::read(&mut file, password)
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_async(path: impl AsRef<std::path::Path>) -> Result<Archive, Error> {
         let data = afs::read(path.as_ref())
