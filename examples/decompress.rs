@@ -13,10 +13,12 @@ fn main() {
             "examples/data/sample",
             "pass".into(),
             |entry, reader, dest| {
-                println!("start extract {}", entry.name());
-                let r = default_entry_extract_fn_async(entry, reader, dest);
-                println!("complete extract {}", entry.name());
-                r
+                Box::pin(async move {
+                    println!("start extract {}", entry.name());
+                    let r = default_entry_extract_fn_async(entry, reader, dest).await;
+                    println!("complete extract {}", entry.name());
+                    r
+                })
             },
         )
         .await

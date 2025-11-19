@@ -34,7 +34,9 @@ fn main() {
                     //only extract the file we want
                     let dest = dest.join(entry.name());
                     let mut ar = futures::io::AllowStdIo::new(reader);
-                    sevenz_rust2::default_entry_extract_fn_async(entry, &mut ar, &dest)?;
+                    async_io::block_on(sevenz_rust2::default_entry_extract_fn_async(
+                        entry, &mut ar, &dest,
+                    ))?;
                 } else {
                     //skip other files
                     std::io::copy(reader, &mut std::io::sink())?;

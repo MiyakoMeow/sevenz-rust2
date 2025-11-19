@@ -168,12 +168,15 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// # Arguments
     /// * `path` - Path to add to the compression
     /// * `filter` - Function that returns `true` for paths that should be included
-    pub async fn push_source_path(
+    pub async fn push_source_path<Fut>(
         &mut self,
         path: impl AsRef<Path>,
-        filter: impl Fn(&Path) -> bool,
-    ) -> Result<(), Error> {
-        encode_path(true, &path, self, filter).await?;
+        mut filter: impl FnMut(&Path) -> Fut,
+    ) -> Result<(), Error>
+    where
+        Fut: std::future::Future<Output = bool>,
+    {
+        encode_path(true, &path, self, &mut filter).await?;
         Ok(())
     }
 
@@ -185,24 +188,30 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// # Arguments
     /// * `path` - Path to add to the compression
     /// * `filter` - Function that returns `true` for paths that should be included
-    pub async fn push_source_path_non_solid(
+    pub async fn push_source_path_non_solid<Fut>(
         &mut self,
         path: impl AsRef<Path>,
-        filter: impl Fn(&Path) -> bool,
-    ) -> Result<(), Error> {
-        encode_path(false, &path, self, filter).await?;
+        mut filter: impl FnMut(&Path) -> Fut,
+    ) -> Result<(), Error>
+    where
+        Fut: std::future::Future<Output = bool>,
+    {
+        encode_path(false, &path, self, &mut filter).await?;
         Ok(())
     }
 }
 
-async fn collect_file_paths(
+async fn collect_file_paths<Fut>(
     src: impl AsRef<Path>,
     paths: &mut Vec<PathBuf>,
-    filter: &dyn Fn(&Path) -> bool,
-) -> std::io::Result<()> {
+    filter: &mut impl FnMut(&Path) -> Fut,
+) -> std::io::Result<()>
+where
+    Fut: std::future::Future<Output = bool>,
+{
     let mut stack: Vec<PathBuf> = vec![src.as_ref().to_path_buf()];
     while let Some(path) = stack.pop() {
-        if !filter(&path) {
+        if !filter(&path).await {
             continue;
         }
         let meta = afs::metadata(&path).await?;
@@ -224,15 +233,18 @@ async fn collect_file_paths(
 
 const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-async fn encode_path<W: Write + Seek>(
+async fn encode_path<W: Write + Seek, Fut>(
     solid: bool,
     src: impl AsRef<Path>,
     zip: &mut ArchiveWriter<W>,
-    filter: impl Fn(&Path) -> bool,
-) -> Result<(), Error> {
+    filter: &mut impl FnMut(&Path) -> Fut,
+) -> Result<(), Error>
+where
+    Fut: std::future::Future<Output = bool>,
+{
     let mut entries = Vec::new();
     let mut paths = Vec::new();
-    collect_file_paths(&src, &mut paths, &filter)
+    collect_file_paths(&src, &mut paths, filter)
         .await
         .map_err(|e| {
             Error::io_msg(

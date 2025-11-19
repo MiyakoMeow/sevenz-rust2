@@ -21,7 +21,7 @@ fn compress_multi_files_solid() {
     let dest = temp_dir.path().join("folder.7z");
 
     let mut sz = ArchiveWriter::new(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
-    smol::block_on(sz.push_source_path(&folder, |_| true)).unwrap();
+    smol::block_on(sz.push_source_path(&folder, |_| async { true })).unwrap();
     let cursor = sz.finish().expect("compress ok");
     let data = cursor.into_inner();
     smol::block_on(async_fs::write(&dest, data)).unwrap();
@@ -58,7 +58,7 @@ fn compress_multi_files_mix_solid_and_non_solid() {
     let mut sz = ArchiveWriter::new(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
 
     // solid compression
-    smol::block_on(sz.push_source_path(&folder, |_| true)).unwrap();
+    smol::block_on(sz.push_source_path(&folder, |_| async { true })).unwrap();
 
     // non solid compression
     for i in 101..=200 {

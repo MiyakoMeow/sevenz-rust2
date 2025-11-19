@@ -27,26 +27,28 @@ fn main() {
             &dest,
             Password::from("pass"),
             |entry, reader, dest| {
-                let path = dest.join(entry.name());
-                if let Some(parent) = path.parent() {
-                    smol::block_on(async_fs::create_dir_all(parent)).unwrap();
-                }
-                let mut buf = [0u8; 8192];
-                let mut data = Vec::new();
-                loop {
-                    let n = async_io::block_on(AsyncReadExt::read(reader, &mut buf))?;
-                    if n == 0 {
-                        break;
+                Box::pin(async move {
+                    let path = dest.join(entry.name());
+                    if let Some(parent) = path.parent() {
+                        async_fs::create_dir_all(parent).await.unwrap();
                     }
-                    data.extend_from_slice(&buf[..n]);
-                    uncompressed_size += n;
-                    println!(
-                        "progress:{:.2}%",
-                        (uncompressed_size as f64 / total_size as f64) * 100f64
-                    );
-                }
-                smol::block_on(async_fs::write(&path, &data)).unwrap();
-                Ok(true)
+                    let mut buf = [0u8; 8192];
+                    let mut data = Vec::new();
+                    loop {
+                        let n = AsyncReadExt::read(reader, &mut buf).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                        uncompressed_size += n;
+                        println!(
+                            "progress:{:.2}%",
+                            (uncompressed_size as f64 / total_size as f64) * 100f64
+                        );
+                    }
+                    async_fs::write(&path, &data).await.unwrap();
+                    Ok(true)
+                })
             },
         )
         .await
