@@ -39,7 +39,7 @@ pub async fn decompress_file(
 pub async fn decompress_file_with_extract_fn(
     src_path: impl AsRef<Path>,
     dest: impl AsRef<Path>,
-    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &Path) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     decompress_path_impl_async(
         src_path.as_ref(),
@@ -80,7 +80,7 @@ pub async fn decompress<R: Read + Seek>(
 pub async fn decompress_with_extract_fn<R: Read + Seek>(
     src_reader: R,
     dest: impl AsRef<Path>,
-    extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &Path) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     decompress_impl_async(src_reader, dest, Password::empty(), extract_fn).await
 }
@@ -137,7 +137,7 @@ pub async fn decompress_with_extract_fn_and_password<R: Read + Seek>(
     src_reader: R,
     dest: impl AsRef<Path>,
     password: Password,
-    extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &Path) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     decompress_impl_async(src_reader, dest, password, extract_fn).await
 }
@@ -147,7 +147,7 @@ async fn decompress_impl_async<R: Read + Seek>(
     mut src_reader: R,
     dest: impl AsRef<Path>,
     password: Password,
-    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &Path) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     use std::io::SeekFrom;
 
@@ -160,7 +160,7 @@ async fn decompress_impl_async<R: Read + Seek>(
     }
     seven.for_each_entries(|entry, reader| {
         let dest_path = dest.join(entry.name());
-        extract_fn(entry, reader, &dest_path)
+        extract_fn(entry, reader, dest_path.as_path())
     })?;
 
     Ok(())
@@ -171,7 +171,7 @@ async fn decompress_path_impl_async(
     src_path: &Path,
     dest: PathBuf,
     password: Password,
-    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &PathBuf) -> Result<bool, Error>,
+    mut extract_fn: impl FnMut(&ArchiveEntry, &mut dyn Read, &Path) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     let mut seven = ArchiveReader::open_async(src_path, password).await?;
     if !dest.exists() {
@@ -179,7 +179,7 @@ async fn decompress_path_impl_async(
     }
     seven.for_each_entries(|entry, reader| {
         let dest_path = dest.join(entry.name());
-        extract_fn(entry, reader, &dest_path)
+        extract_fn(entry, reader, dest_path.as_path())
     })?;
     Ok(())
 }
@@ -194,13 +194,13 @@ async fn decompress_path_impl_async(
 pub fn default_entry_extract_fn_async(
     entry: &ArchiveEntry,
     reader: &mut dyn Read,
-    dest: &PathBuf,
+    dest: &Path,
 ) -> Result<bool, Error> {
     if entry.is_directory() {
-        let dir = dest.clone();
+        let dir = dest.to_path_buf();
         block_on(afs::create_dir_all(&dir))?;
     } else {
-        let path = dest.clone();
+        let path = dest.to_path_buf();
         if let Some(p) = path.parent() {
             if !p.exists() {
                 block_on(afs::create_dir_all(p))?;

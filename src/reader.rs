@@ -146,7 +146,7 @@ impl<R: Read> Read for Crc32VerifyingReader<R> {
 impl Archive {
     /// Open 7z file under specified `path`.
     #[inline]
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Archive, Error> {
+    pub(crate) fn open(path: impl AsRef<std::path::Path>) -> Result<Archive, Error> {
         Self::open_with_password(path, &Password::empty())
     }
 
@@ -156,7 +156,7 @@ impl Archive {
     /// - `reader`   - the path to the 7z file
     /// - `password` - archive password encoded in utf16 little endian
     #[inline]
-    pub fn open_with_password(
+    pub(crate) fn open_with_password(
         path: impl AsRef<std::path::Path>,
         password: &Password,
     ) -> Result<Archive, Error> {
@@ -194,23 +194,19 @@ impl Archive {
     /// # Example
     ///
     /// ```no_run
-    /// use std::{
-    ///     fs::File,
-    ///     io::{Read, Seek},
-    /// };
-    ///
     /// use sevenz_rust2::*;
     ///
-    /// let mut reader = File::open("example.7z").unwrap();
-    ///
     /// let password = Password::from("the password");
-    /// let archive = Archive::read(&mut reader, &password).unwrap();
+    /// let archive = smol::block_on(Archive::open_with_password_async("example.7z", &password)).unwrap();
     ///
     /// for entry in &archive.files {
     ///     println!("{}", entry.name());
     /// }
     /// ```
-    pub fn read<R: Read + Seek>(reader: &mut R, password: &Password) -> Result<Archive, Error> {
+    pub(crate) fn read<R: Read + Seek>(
+        reader: &mut R,
+        password: &Password,
+    ) -> Result<Archive, Error> {
         let reader_len = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
 
@@ -1116,17 +1112,6 @@ pub struct ArchiveReader<R: Read + Seek> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl ArchiveReader<File> {
-    /// Opens a 7z archive file at the given `path` and creates a [`ArchiveReader`] to read it.
-    #[inline]
-    pub fn open(path: impl AsRef<std::path::Path>, password: Password) -> Result<Self, Error> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
-        Self::new(file, password)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 impl ArchiveReader<std::io::Cursor<Vec<u8>>> {
     /// Opens a 7z archive file asynchronously and creates an `ArchiveReader` using an in-memory buffer.
     pub async fn open_async(
@@ -1138,12 +1123,17 @@ impl ArchiveReader<std::io::Cursor<Vec<u8>>> {
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         Self::new(std::io::Cursor::new(data), password)
     }
+
+    /// Opens a 7z archive from in-memory bytes asynchronously.
+    pub async fn open_from_bytes_async(data: Vec<u8>, password: Password) -> Result<Self, Error> {
+        Self::new(std::io::Cursor::new(data), password)
+    }
 }
 
 impl<R: Read + Seek> ArchiveReader<R> {
     /// Creates a [`ArchiveReader`] to read a 7z archive file from the given `source` reader.
     #[inline]
-    pub fn new(mut source: R, password: Password) -> Result<Self, Error> {
+    pub(crate) fn new(mut source: R, password: Password) -> Result<Self, Error> {
         let archive = Archive::read(&mut source, &password)?;
 
         let mut reader = Self {
@@ -1173,7 +1163,7 @@ impl<R: Read + Seek> ArchiveReader<R> {
     /// * `source` - The reader providing access to the archive data
     /// * `password` - Password for encrypted archives
     #[inline]
-    pub fn from_archive(archive: Archive, source: R, password: Password) -> Self {
+    pub(crate) fn from_archive(archive: Archive, source: R, password: Password) -> Self {
         let mut reader = Self {
             source,
             archive,

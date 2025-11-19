@@ -1,4 +1,3 @@
-use std::fs::File;
 #[cfg(feature = "util")]
 use std::{
     fs::{read, read_to_string},
@@ -237,11 +236,17 @@ fn decompress_zstdmt_lz4_file() {
 
 #[test]
 fn test_bcj2() {
-    let mut file = File::open("tests/resources/7za433_7zip_lzma2_bcj2.7z").unwrap();
-    let archive = Archive::read(&mut file, &Password::empty()).unwrap();
+    let archive = smol::block_on(Archive::open_with_password_async(
+        "tests/resources/7za433_7zip_lzma2_bcj2.7z",
+        &Password::empty(),
+    ))
+    .unwrap();
     for i in 0..archive.blocks.len() {
         let password = Password::empty();
-        let fd = BlockDecoder::new(1, i, &archive, &password, &mut file);
+        let data =
+            smol::block_on(async_fs::read("tests/resources/7za433_7zip_lzma2_bcj2.7z")).unwrap();
+        let mut cursor = std::io::Cursor::new(data);
+        let fd = BlockDecoder::new(1, i, &archive, &password, &mut cursor);
         println!("entry_count:{}", fd.entry_count());
         fd.for_each_entries(&mut |entry, reader| {
             println!("{}=>{:?}", entry.has_stream, entry.name());
@@ -259,8 +264,9 @@ fn test_entry_compressed_size() {
         let path = entry.unwrap().path();
         if path.to_string_lossy().ends_with("7z") {
             println!("{path:?}");
-            let mut file = File::open(path).unwrap();
-            let archive = Archive::read(&mut file, &Password::empty()).unwrap();
+            let archive =
+                smol::block_on(Archive::open_with_password_async(&path, &Password::empty()))
+                    .unwrap();
             for i in 0..archive.blocks.len() {
                 let fi = archive.stream_map.block_first_file_index[i];
                 let file = &archive.files[fi];
@@ -281,10 +287,16 @@ fn test_entry_compressed_size() {
 #[test]
 fn test_get_file_by_path() {
     // non_solid.7z and solid.7z are expected to have the same content.
-    let mut non_solid_reader =
-        ArchiveReader::open("tests/resources/non_solid.7z", Password::empty()).unwrap();
-    let mut solid_reader =
-        ArchiveReader::open("tests/resources/solid.7z", Password::empty()).unwrap();
+    let mut non_solid_reader = smol::block_on(ArchiveReader::open_async(
+        "tests/resources/non_solid.7z",
+        Password::empty(),
+    ))
+    .unwrap();
+    let mut solid_reader = smol::block_on(ArchiveReader::open_async(
+        "tests/resources/solid.7z",
+        Password::empty(),
+    ))
+    .unwrap();
 
     let paths: Vec<String> = non_solid_reader
         .archive()

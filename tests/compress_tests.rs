@@ -200,7 +200,11 @@ fn test_compression_method(methods: &[EncoderConfiguration]) {
         writer.finish().unwrap();
     }
 
-    let mut reader = ArchiveReader::new(Cursor::new(bytes.as_slice()), Password::empty()).unwrap();
+    let mut reader = smol::block_on(ArchiveReader::open_from_bytes_async(
+        bytes,
+        Password::empty(),
+    ))
+    .unwrap();
 
     assert_eq!(reader.archive().files.len(), 2);
 

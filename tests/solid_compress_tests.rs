@@ -21,9 +21,11 @@ fn compress_multi_files_solid() {
     }
     let dest = temp_dir.path().join("folder.7z");
 
-    let mut sz = ArchiveWriter::create(&dest).unwrap();
+    let mut sz = ArchiveWriter::new(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
     sz.push_source_path(&folder, |_| true).unwrap();
-    sz.finish().expect("compress ok");
+    let cursor = sz.finish().expect("compress ok");
+    let data = cursor.into_inner();
+    smol::block_on(async_fs::write(&dest, data)).unwrap();
 
     let decompress_dest = temp_dir.path().join("decompress");
     smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");
@@ -40,8 +42,6 @@ fn compress_multi_files_solid() {
 #[cfg(feature = "compress")]
 #[test]
 fn compress_multi_files_mix_solid_and_non_solid() {
-    use std::fs::File;
-
     let temp_dir = tempdir().unwrap();
     let folder = temp_dir.path().join("folder");
     std::fs::create_dir(&folder).unwrap();
@@ -56,7 +56,7 @@ fn compress_multi_files_mix_solid_and_non_solid() {
     }
     let dest = temp_dir.path().join("folder.7z");
 
-    let mut sz = ArchiveWriter::create(&dest).unwrap();
+    let mut sz = ArchiveWriter::new(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
 
     // solid compression
     sz.push_source_path(&folder, |_| true).unwrap();
@@ -70,14 +70,17 @@ fn compress_multi_files_mix_solid_and_non_solid() {
         contents.push(content);
 
         let src = folder.join(&name);
+        let data = smol::block_on(async_fs::read(&src)).unwrap();
         sz.push_archive_entry(
             ArchiveEntry::from_path(&src, name),
-            Some(File::open(src).unwrap()),
+            Some(std::io::Cursor::new(data)),
         )
         .expect("ok");
     }
 
-    sz.finish().expect("compress ok");
+    let cursor = sz.finish().expect("compress ok");
+    let data = cursor.into_inner();
+    smol::block_on(async_fs::write(&dest, data)).unwrap();
 
     let decompress_dest = temp_dir.path().join("decompress");
     smol::block_on(decompress_file(dest, &decompress_dest)).expect("decompress ok");

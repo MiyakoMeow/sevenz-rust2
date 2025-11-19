@@ -1,16 +1,22 @@
+use async_fs as afs;
 use std::path::PathBuf;
 
 use sevenz_rust2::{Archive, BlockDecoder, Password};
 
 fn main() {
-    let mut file = std::fs::File::open("examples/data/sample.7z").unwrap();
     let password = Password::empty();
-    let archive = Archive::read(&mut file, &password).unwrap();
+    let archive = smol::block_on(Archive::open_with_password_async(
+        "examples/data/sample.7z",
+        &password,
+    ))
+    .unwrap();
+    let data = smol::block_on(afs::read("examples/data/sample.7z")).unwrap();
+    let mut cursor = std::io::Cursor::new(data);
     let block_count = archive.blocks.len();
     let my_file_name = "7zFormat.txt";
 
     for block_index in 0..block_count {
-        let forder_dec = BlockDecoder::new(1, block_index, &archive, &password, &mut file);
+        let forder_dec = BlockDecoder::new(1, block_index, &archive, &password, &mut cursor);
 
         if !forder_dec
             .entries()

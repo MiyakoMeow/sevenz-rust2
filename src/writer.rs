@@ -89,7 +89,7 @@ pub struct ArchiveWriter<W: Write> {
 #[cfg(not(target_arch = "wasm32"))]
 impl ArchiveWriter<File> {
     /// Creates a file to write a 7z archive to.
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn create(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::create(path.as_ref())
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         Self::new(file)
@@ -134,20 +134,20 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     ///
     /// # Example
     /// ```no_run
-    /// use std::{fs::File, path::Path};
-    ///
+    /// use std::io::Cursor;
+    /// use std::path::Path;
     /// use sevenz_rust2::*;
-    /// let mut sz = ArchiveWriter::create("path/to/dest.7z").expect("create writer ok");
+    /// let mut sz = ArchiveWriter::new(Cursor::new(Vec::<u8>::new())).expect("create writer ok");
     /// let src = Path::new("path/to/source.txt");
     /// let name = "source.txt".to_string();
     /// let entry = sz
     ///     .push_archive_entry(
     ///         ArchiveEntry::from_path(&src, name),
-    ///         Some(File::open(src).unwrap()),
+    ///         Some(Cursor::new(&b"example"[..])),
     ///     )
     ///     .expect("ok");
     /// let compressed_size = entry.compressed_size;
-    /// sz.finish().expect("done");
+    /// let _cursor = sz.finish().expect("done");
     /// ```
     pub fn push_archive_entry<R: Read>(
         &mut self,

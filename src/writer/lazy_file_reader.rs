@@ -1,8 +1,12 @@
-use std::{fs::File, io::Read, path::PathBuf};
+use std::{io::Read, path::PathBuf};
+
+use async_fs as afs;
+use async_io::block_on;
+use futures_lite::AsyncReadExt;
 
 pub(crate) struct LazyFileReader {
     path: PathBuf,
-    reader: Option<File>,
+    reader: Option<afs::File>,
     end: bool,
 }
 
@@ -22,9 +26,9 @@ impl Read for LazyFileReader {
             return Ok(0);
         }
         if self.reader.is_none() {
-            self.reader = Some(File::open(&self.path)?);
+            self.reader = Some(block_on(afs::File::open(&self.path))?);
         }
-        let n = self.reader.as_mut().unwrap().read(buf)?;
+        let n = block_on(self.reader.as_mut().unwrap().read(buf))?;
         if n == 0 {
             self.end = true;
             self.reader = None;

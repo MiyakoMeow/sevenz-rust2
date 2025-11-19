@@ -1,3 +1,4 @@
+use async_fs as afs;
 use std::{path::PathBuf, sync::Arc};
 
 use sevenz_rust2::{Archive, BlockDecoder, Password};
@@ -11,9 +12,12 @@ use sevenz_rust2::{Archive, BlockDecoder, Password};
 //    See `ArchiveReader::set_thread_count()` for more information.`
 fn main() {
     let time = std::time::Instant::now();
-    let mut file = std::fs::File::open("examples/data/sample.7z").unwrap();
     let password = Password::empty();
-    let archive = Archive::read(&mut file, &password).unwrap();
+    let archive = smol::block_on(Archive::open_with_password_async(
+        "examples/data/sample.7z",
+        &password,
+    ))
+    .unwrap();
     let block_count = archive.blocks.len();
     if block_count <= 1 {
         println!("block count less than 1, use single thread");
@@ -24,12 +28,14 @@ fn main() {
     let mut threads = Vec::new();
 
     // 1. We multi-thread by decompressing each block itself in parallel.
+    let data = smol::block_on(afs::read("examples/data/sample.7z")).unwrap();
     for block_index in 0..block_count {
         let archive = archive.clone();
         let password = password.clone();
+        let data = data.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut source = std::fs::File::open("examples/data/sample.7z").unwrap();
+            let mut source = std::io::Cursor::new(data);
 
             // 2. For decoders that supports it, we can set the thread_count on the block decoder
             //    so that it uses multiple threads to decode the block. Currently only LZMA2 is

@@ -1,10 +1,7 @@
 use std::{collections::HashMap, env::temp_dir, time::Instant};
 
 use rand::Rng;
-use sevenz_rust2::{
-    encoder_options::{AesEncoderOptions, Lzma2Options},
-    *,
-};
+use sevenz_rust2::*;
 
 fn main() {
     let temp_dir = temp_dir();
@@ -32,21 +29,19 @@ fn main() {
     let time = Instant::now();
 
     // start to compress
-    let mut sz = ArchiveWriter::create(&dest).expect("create writer ok");
-    sz.set_encrypt_header(true);
-
     #[cfg(feature = "aes256")]
     {
-        sz.set_content_methods(vec![
-            AesEncoderOptions::new(Password::new("sevenz-rust")).into(),
-            // We configure LZMA2 to use multiple threads to encode the data.
-            Lzma2Options::from_level_mt(9, 4, 1 << 18).into(),
-        ]);
+        smol::block_on(sevenz_rust2::compress_to_path_encrypted(
+            &src,
+            &dest,
+            Password::new("sevenz-rust"),
+        ))
+        .expect("compress ok");
     }
-
-    sz.push_source_path(&src, |_| true).expect("pack ok");
-    println!("finish");
-    sz.finish().expect("compress ok");
+    #[cfg(not(feature = "aes256"))]
+    {
+        smol::block_on(sevenz_rust2::compress_to_path(&src, &dest)).expect("compress ok");
+    }
     println!("compress took {:?}/{:?}", time.elapsed(), dest);
     if src.exists() {
         let _ = std::fs::remove_dir_all(&src);
@@ -59,7 +54,11 @@ fn main() {
     println!("ratio:{:?}", m.len() as f64 / unpack_size as f64);
 
     // start to decompress
-    let mut sz = ArchiveReader::open(&dest, "sevenz-rust".into()).expect("create reader ok");
+    let mut sz = smol::block_on(ArchiveReader::open_async(
+        &dest,
+        Password::new("sevenz-rust"),
+    ))
+    .expect("create reader ok");
     assert_eq!(contents.len(), sz.archive().files.len());
     assert_eq!(1, sz.archive().blocks.len());
     sz.for_each_entries(|entry, reader| {

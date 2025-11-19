@@ -1,5 +1,6 @@
-use std::{env, fs::File, time::Instant};
+use std::{env, time::Instant};
 
+use async_fs as afs;
 use sevenz_rust2::{ArchiveReader, ArchiveWriter, Password};
 
 fn main() {
@@ -53,7 +54,7 @@ fn main() {
 
     let now = Instant::now();
 
-    let mut writer = ArchiveWriter::create(&output_path)
+    let mut writer = ArchiveWriter::new(std::io::Cursor::new(Vec::<u8>::new()))
         .unwrap_or_else(|error| panic!("Failed to create archive '{output_path}': {error}"));
 
     if solid {
@@ -72,10 +73,14 @@ fn main() {
         }
     }
 
-    writer.finish().expect("Failed to finalize archive");
+    let cursor = writer.finish().expect("Failed to finalize archive");
+    let data = cursor.into_inner();
+    smol::block_on(afs::write(&output_path, data))
+        .unwrap_or_else(|error| panic!("Failed to write output file '{output_path}': {error}"));
 
-    let _archive_reader = ArchiveReader::new(File::open(&output_path).unwrap(), Password::empty())
-        .unwrap_or_else(|error| panic!("Failed to open output file '{output_path}': {error}"));
+    let _archive_reader =
+        smol::block_on(ArchiveReader::open_async(&output_path, Password::empty()))
+            .unwrap_or_else(|error| panic!("Failed to open output file '{output_path}': {error}"));
 
     println!("Archive created: {output_path}");
     println!("Compress done: {:?}", now.elapsed());
