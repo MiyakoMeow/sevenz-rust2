@@ -305,6 +305,7 @@ checksum = "680dc087785c5230f8e8843e2e57ac7c1c90488b6a91b88caa265410568f441b"
 dependencies = [
  "bzip2",
  "compression-core",
+ "deflate64",
  "flate2",
  "zstd",
  "zstd-safe",
@@ -358,6 +359,12 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
+
+[[package]]
+name = "deflate64"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26bf8fc351c5ed29b5c2f0cbbac1b209b74f60ecd62e675a998df72c49af5204"
 
 [[package]]
 name = "deranged"
