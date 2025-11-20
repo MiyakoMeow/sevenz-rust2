@@ -1,5 +1,4 @@
 use std::{
-    io::Write,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -45,9 +44,6 @@ use async_compression::futures::write::LzmaEncoder as AsyncLzmaEncoder;
 use async_compression::futures::write::ZstdEncoder as AsyncZstdEncoder;
 use futures::io::{AsyncWrite, AsyncWriteExt};
 
-/// 归档数据编码器枚举，根据配置选择相应的异步编码器进行写入。
-///
-/// 所有变体实现同步 `Write` 接口以便编码链路统一透传；内部实际写入由异步编码器完成。
 pub(crate) enum Encoder<W: AsyncWrite + Unpin> {
     Copy(CountingWriter<W>),
     Bcj(Option<Box<BcjWriter<CountingWriter<W>>>>),
@@ -115,178 +111,205 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StripLzmaHeaderWrite<W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Some encoder need to finish the encoding process. Because of lifetime limitations on
-        // dynamic dispatch, we need to implement an implicit contract, where empty writes with
-        // "&[]" trigger the call to "finish()". We need to also make sure to propagate the empty
-        // write into the inner writer, so that the whole chain of encoders can properly finish
-        // their data stream. Not a great way to do it, but I couldn't get a proper dynamic
-        // dispatch based approach to work.
-        match self {
-            Encoder::Copy(w) => std::io::Write::write(w, buf),
-            Encoder::Delta(w) => w.as_mut().write(buf),
+impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match &mut *self {
+            Encoder::Copy(w) => Pin::new(w).poll_write(cx, buf),
+            Encoder::Delta(w) => Poll::Ready(std::io::Write::write(w.as_mut(), buf)),
             Encoder::Bcj(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    std::io::Write::write(&mut inner, buf)?;
-                    Ok(0)
+                    let _ = async_io::block_on(AsyncWriteExt::write(&mut inner, buf));
+                    Poll::Ready(Ok(0))
                 }
-                false => std::io::Write::write(w.as_mut().unwrap().as_mut(), buf),
+                false => Poll::Ready(std::io::Write::write(w.as_mut().unwrap().as_mut(), buf)),
             },
             Encoder::Lzma(w) => match buf.is_empty() {
                 true => {
                     let mut writer = w.take().unwrap();
-                    async_io::block_on(writer.close())?;
-                    let strip = writer.into_inner();
-                    let mut inner = strip.into_inner();
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    match Pin::new(&mut *writer).as_mut().poll_close(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let strip = writer.into_inner();
+                            let mut inner = strip.into_inner();
+                            let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                            Poll::Ready(Ok(0))
+                        }
+                        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                        Poll::Pending => Poll::Pending,
+                    }
                 }
-                false => {
-                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
-                }
+                false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             Encoder::Lzma2(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                    Poll::Ready(Ok(0))
                 }
-                false => std::io::Write::write(w.as_mut().unwrap().as_mut(), buf),
+                false => Poll::Ready(std::io::Write::write(w.as_mut().unwrap().as_mut(), buf)),
             },
             Encoder::Lzma2Mt(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                    Poll::Ready(Ok(0))
                 }
-                false => std::io::Write::write(w.as_mut().unwrap().as_mut(), buf),
+                false => Poll::Ready(std::io::Write::write(w.as_mut().unwrap().as_mut(), buf)),
             },
             #[cfg(feature = "ppmd")]
             Encoder::Ppmd(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish(false)?;
-                    let _ = Write::write(&mut inner, buf);
-                    Ok(0)
+                    let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                    Poll::Ready(Ok(0))
                 }
-                false => w.as_mut().unwrap().write(buf),
+                false => Poll::Ready(std::io::Write::write(w.as_mut().unwrap().as_mut(), buf)),
             },
-            // TODO: Also add a proper "finish" method here.
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => async_io::block_on(AsyncWriteExt::write(w.as_mut(), buf)),
+            Encoder::Brotli(w) => Pin::new(w.as_mut()).poll_write(cx, buf),
             #[cfg(feature = "bzip2")]
             Encoder::Bzip2(w) => match buf.is_empty() {
                 true => {
                     let mut writer = w.take().unwrap();
-                    async_io::block_on(writer.close())?;
-                    let mut inner = writer.into_inner();
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    match Pin::new(&mut *writer).as_mut().poll_close(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let mut inner = writer.into_inner();
+                            let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                            Poll::Ready(Ok(0))
+                        }
+                        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                        Poll::Pending => Poll::Pending,
+                    }
                 }
-                false => {
-                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
-                }
+                false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             #[cfg(feature = "deflate")]
             Encoder::Deflate(w) => match buf.is_empty() {
                 true => {
                     let mut writer = w.take().unwrap();
-                    async_io::block_on(writer.close())?;
-                    let mut inner = writer.into_inner();
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    match Pin::new(&mut *writer).as_mut().poll_close(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let mut inner = writer.into_inner();
+                            let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                            Poll::Ready(Ok(0))
+                        }
+                        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                        Poll::Pending => Poll::Pending,
+                    }
                 }
-                false => {
-                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
-                }
+                false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             #[cfg(feature = "lz4")]
             Encoder::Lz4(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                    Poll::Ready(Ok(0))
                 }
-                false => {
-                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
-                }
+                false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => match buf.is_empty() {
                 true => {
                     let mut writer = w.take().unwrap();
-                    async_io::block_on(writer.close())?;
-                    let mut inner = writer.into_inner();
-                    let _ = std::io::Write::write(&mut inner, buf);
-                    Ok(0)
+                    match Pin::new(&mut *writer).as_mut().poll_close(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let mut inner = writer.into_inner();
+                            let _ = Pin::new(&mut inner).poll_write(cx, buf);
+                            Poll::Ready(Ok(0))
+                        }
+                        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                        Poll::Pending => Poll::Pending,
+                    }
                 }
-                false => {
-                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
-                }
+                false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => std::io::Write::write(w.as_mut(), buf),
+            Encoder::Aes(w) => Poll::Ready(std::io::Write::write(w.as_mut(), buf)),
         }
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Encoder::Copy(w) => std::io::Write::flush(w),
-            Encoder::Bcj(w) => w.as_mut().unwrap().flush(),
-            Encoder::Delta(w) => std::io::Write::flush(w.as_mut()),
-            Encoder::Lzma(w) => {
-                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
-            }
-            Encoder::Lzma2(w) => w.as_mut().unwrap().as_mut().flush(),
-            Encoder::Lzma2Mt(w) => w.as_mut().unwrap().as_mut().flush(),
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            Encoder::Copy(w) => Pin::new(w).poll_flush(cx),
+            Encoder::Bcj(w) => Poll::Ready(std::io::Write::flush(w.as_mut().unwrap().as_mut())),
+            Encoder::Delta(w) => Poll::Ready(std::io::Write::flush(w.as_mut())),
+            Encoder::Lzma(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
+            Encoder::Lzma2(w) => Poll::Ready(std::io::Write::flush(w.as_mut().unwrap().as_mut())),
+            Encoder::Lzma2Mt(w) => Poll::Ready(std::io::Write::flush(w.as_mut().unwrap().as_mut())),
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut())),
+            Encoder::Brotli(w) => Pin::new(w.as_mut()).poll_flush(cx),
             #[cfg(feature = "ppmd")]
-            Encoder::Ppmd(w) => std::io::Write::flush(w.as_mut().unwrap().as_mut()),
+            Encoder::Ppmd(w) => Poll::Ready(std::io::Write::flush(w.as_mut().unwrap().as_mut())),
             #[cfg(feature = "bzip2")]
-            Encoder::Bzip2(w) => {
-                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
-            }
+            Encoder::Bzip2(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
             #[cfg(feature = "deflate")]
-            Encoder::Deflate(w) => {
-                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
+            Encoder::Deflate(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
+            #[cfg(feature = "lz4")]
+            Encoder::Lz4(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
+            #[cfg(feature = "zstd")]
+            Encoder::Zstd(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
+            #[cfg(feature = "aes256")]
+            Encoder::Aes(w) => Poll::Ready(std::io::Write::flush(w.as_mut())),
+        }
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            Encoder::Copy(w) => Pin::new(w).poll_close(cx),
+            Encoder::Delta(_w) => Poll::Ready(Ok(())),
+            Encoder::Bcj(w) => {
+                let writer = w.take().unwrap();
+                let mut inner = writer.finish()?;
+                let _ = Pin::new(&mut inner).poll_write(cx, &[]);
+                Poll::Ready(Ok(()))
             }
+            Encoder::Lzma(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_close(cx),
+            Encoder::Lzma2(w) => {
+                let writer = w.take().unwrap();
+                let _inner = writer.finish()?;
+                Poll::Ready(Ok(()))
+            }
+            Encoder::Lzma2Mt(w) => {
+                let writer = w.take().unwrap();
+                let _inner = writer.finish()?;
+                Poll::Ready(Ok(()))
+            }
+            #[cfg(feature = "brotli")]
+            Encoder::Brotli(w) => Pin::new(w.as_mut()).poll_close(cx),
+            #[cfg(feature = "ppmd")]
+            Encoder::Ppmd(w) => {
+                let writer = w.take().unwrap();
+                let _inner = writer.finish(false)?;
+                Poll::Ready(Ok(()))
+            }
+            #[cfg(feature = "bzip2")]
+            Encoder::Bzip2(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_close(cx),
+            #[cfg(feature = "deflate")]
+            Encoder::Deflate(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_close(cx),
             #[cfg(feature = "lz4")]
             Encoder::Lz4(w) => {
-                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
+                let writer = w.take().unwrap();
+                let _inner = writer.finish()?;
+                Poll::Ready(Ok(()))
             }
             #[cfg(feature = "zstd")]
-            Encoder::Zstd(w) => {
-                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
-            }
+            Encoder::Zstd(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_close(cx),
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => std::io::Write::flush(w.as_mut()),
+            Encoder::Aes(w) => {
+                let _ = std::io::Write::write(w.as_mut(), &[])?;
+                Poll::Ready(Ok(()))
+            }
         }
-    }
-}
-
-impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Poll::Ready(std::io::Write::write(&mut self.as_mut().get_mut(), buf))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(std::io::Write::flush(&mut self.as_mut().get_mut()))
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let _ = std::io::Write::write(&mut self.as_mut().get_mut(), &[])?;
-        Poll::Ready(Ok(()))
     }
 }
 
