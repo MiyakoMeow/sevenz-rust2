@@ -178,7 +178,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
             },
             // TODO: Also add a proper "finish" method here.
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => std::io::Write::write(w.as_mut(), buf),
+            Encoder::Brotli(w) => async_io::block_on(AsyncWriteExt::write(w.as_mut(), buf)),
             #[cfg(feature = "bzip2")]
             Encoder::Bzip2(w) => match buf.is_empty() {
                 true => {
@@ -213,7 +213,9 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                     let _ = std::io::Write::write(&mut inner, buf);
                     Ok(0)
                 }
-                false => w.as_mut().unwrap().as_mut().write(buf),
+                false => {
+                    async_io::block_on(AsyncWriteExt::write(w.as_mut().unwrap().as_mut(), buf))
+                }
             },
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => match buf.is_empty() {
@@ -244,7 +246,7 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
             Encoder::Lzma2(w) => w.as_mut().unwrap().as_mut().flush(),
             Encoder::Lzma2Mt(w) => w.as_mut().unwrap().as_mut().flush(),
             #[cfg(feature = "brotli")]
-            Encoder::Brotli(w) => std::io::Write::flush(w.as_mut()),
+            Encoder::Brotli(w) => async_io::block_on(AsyncWriteExt::flush(w.as_mut())),
             #[cfg(feature = "ppmd")]
             Encoder::Ppmd(w) => std::io::Write::flush(w.as_mut().unwrap().as_mut()),
             #[cfg(feature = "bzip2")]
@@ -256,7 +258,9 @@ impl<W: AsyncWrite + Unpin> Write for Encoder<W> {
                 async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
             }
             #[cfg(feature = "lz4")]
-            Encoder::Lz4(w) => std::io::Write::flush(w.as_mut().unwrap().as_mut()),
+            Encoder::Lz4(w) => {
+                async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
+            }
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => {
                 async_io::block_on(AsyncWriteExt::flush(w.as_mut().unwrap().as_mut()))
