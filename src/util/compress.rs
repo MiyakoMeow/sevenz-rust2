@@ -19,14 +19,14 @@ pub async fn compress<W: AsyncWrite + AsyncSeek + Unpin>(
     src: impl AsRef<Path>,
     dest: W,
 ) -> Result<W, Error> {
-    let mut archive_writer = ArchiveWriter::new(dest)?;
+    let mut archive_writer = ArchiveWriter::new(dest).await?;
     let parent = if src.as_ref().is_dir() {
         src.as_ref()
     } else {
         src.as_ref().parent().unwrap_or(src.as_ref())
     };
     compress_path(src.as_ref(), parent, &mut archive_writer).await?;
-    let out = archive_writer.finish()?;
+    let out = archive_writer.finish().await?;
     Ok(out)
 }
 
@@ -42,7 +42,7 @@ pub async fn compress_encrypted<W: AsyncWrite + AsyncSeek + Unpin>(
     dest: W,
     password: Password,
 ) -> Result<W, Error> {
-    let mut archive_writer = ArchiveWriter::new(dest)?;
+    let mut archive_writer = ArchiveWriter::new(dest).await?;
     if !password.is_empty() {
         archive_writer.set_content_methods(vec![
             AesEncoderOptions::new(password).into(),
@@ -55,7 +55,7 @@ pub async fn compress_encrypted<W: AsyncWrite + AsyncSeek + Unpin>(
         src.as_ref().parent().unwrap_or(src.as_ref())
     };
     compress_path(src.as_ref(), parent, &mut archive_writer).await?;
-    let out = archive_writer.finish()?;
+    let out = archive_writer.finish().await?;
     Ok(out)
 }
 
@@ -126,7 +126,9 @@ async fn compress_path<W: AsyncWrite + AsyncSeek + Unpin, P: AsRef<Path>>(
             .await
             .map_err(|e| Error::io_msg(e, "error metadata"))?;
         if meta.is_dir() {
-            archive_writer.push_archive_entry::<&[u8]>(entry, None)?;
+            archive_writer
+                .push_archive_entry::<&[u8]>(entry, None)
+                .await?;
             let mut rd = afs::read_dir(&path)
                 .await
                 .map_err(|e| Error::io_msg(e, "error read dir"))?;
@@ -145,7 +147,8 @@ async fn compress_path<W: AsyncWrite + AsyncSeek + Unpin, P: AsRef<Path>>(
                 .push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
                     entry,
                     Some(LazyFileReader::new(path.clone()).into()),
-                )?;
+                )
+                .await?;
         }
     }
     Ok(())
@@ -252,7 +255,8 @@ where
             zip.push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
                 ArchiveEntry::from_path(ele.as_path(), name),
                 Some(LazyFileReader::new(ele.clone()).into()),
-            )?;
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -266,11 +270,12 @@ where
             zip.push_archive_entry::<crate::writer::SourceReader<crate::writer::LazyFileReader>>(
                 ArchiveEntry::from_path(ele.as_path(), name),
                 Some(LazyFileReader::new(ele.clone()).into()),
-            )?;
+            )
+            .await?;
             continue;
         }
         if file_size + size >= MAX_BLOCK_SIZE {
-            zip.push_archive_entries(entries, files)?;
+            zip.push_archive_entries(entries, files).await?;
             entries = Vec::new();
             files = Vec::new();
             file_size = 0;
@@ -280,7 +285,7 @@ where
         files.push(LazyFileReader::new(ele).into());
     }
     if !entries.is_empty() {
-        zip.push_archive_entries(entries, files)?;
+        zip.push_archive_entries(entries, files).await?;
     }
 
     Ok(())

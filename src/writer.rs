@@ -87,19 +87,16 @@ impl ArchiveWriter<futures::io::Cursor<Vec<u8>>> {
     /// 创建一个基于内存缓冲的 7z 写入器。
     ///
     /// 返回使用 `Vec<u8>` 作为底层存储的 `ArchiveWriter`，适合测试或无需落盘的场景。
-    pub fn create_in_memory() -> Result<Self> {
+    pub async fn create_in_memory() -> Result<Self> {
         let cursor = futures::io::Cursor::new(Vec::<u8>::new());
-        Self::new(cursor)
+        Self::new(cursor).await
     }
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
     /// Prepares writer to write a 7z archive to.
-    pub fn new(mut writer: W) -> Result<Self> {
-        async_io::block_on(AsyncSeekExt::seek(
-            &mut writer,
-            SeekFrom::Start(SIGNATURE_HEADER_SIZE),
-        ))?;
+    pub async fn new(mut writer: W) -> Result<Self> {
+        AsyncSeekExt::seek(&mut writer, SeekFrom::Start(SIGNATURE_HEADER_SIZE)).await?;
 
         Ok(Self {
             output: writer,
@@ -137,19 +134,22 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
     /// use std::io::Cursor;
     /// use std::path::Path;
     /// use sevenz_rust2::*;
-    /// let mut sz = ArchiveWriter::create_in_memory().expect("create writer ok");
+    /// let mut sz = smol::block_on(ArchiveWriter::create_in_memory()).expect("create writer ok");
     /// let src = Path::new("path/to/source.txt");
     /// let name = "source.txt".to_string();
-    /// let entry = sz
-    ///     .push_archive_entry(
-    ///         ArchiveEntry::from_path(&src, name),
-    ///         Some(futures::io::Cursor::new(&b"example"[..])),
-    ///     )
-    ///     .expect("ok");
+    /// let entry = smol::block_on(async {
+    ///     sz
+    ///         .push_archive_entry(
+    ///             ArchiveEntry::from_path(&src, name),
+    ///             Some(futures::io::Cursor::new(&b"example"[..])),
+    ///         )
+    ///         .await
+    ///         .expect("ok")
+    /// });
     /// let compressed_size = entry.compressed_size;
-    /// let _cursor = sz.finish().expect("done");
+    /// let _cursor = smol::block_on(sz.finish()).expect("done");
     /// ```
-    pub fn push_archive_entry<R: AsyncRead + Unpin>(
+    pub async fn push_archive_entry<R: AsyncRead + Unpin>(
         &mut self,
         mut entry: ArchiveEntry,
         reader: Option<R>,
@@ -172,19 +172,23 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
                     let mut buf = [0u8; 4096];
                     loop {
-                        let n = async_io::block_on(AsyncReadExt::read(&mut r, &mut buf)).map_err(
-                            |e| Error::io_msg(e, format!("Encode entry:{}", entry.name())),
-                        )?;
+                        let n = AsyncReadExt::read(&mut r, &mut buf).await.map_err(|e| {
+                            Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                        })?;
                         if n == 0 {
                             break;
                         }
-                        Write::write_all(&mut w, &buf[..n]).map_err(|e| {
-                            Error::io_msg(e, format!("Encode entry:{}", entry.name()))
-                        })?;
+                        AsyncWriteExt::write_all(&mut w, &buf[..n])
+                            .await
+                            .map_err(|e| {
+                                Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                            })?;
                     }
-                    Write::flush(&mut w)
+                    AsyncWriteExt::flush(&mut w)
+                        .await
                         .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
-                    Write::write(&mut w, &[])
+                    AsyncWriteExt::write(&mut w, &[])
+                        .await
                         .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
 
                     (w.crc_value(), write_len)
@@ -222,7 +226,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
     ///
     /// # Panics
     /// * If `entries`'s length not equals to `reader.reader_len()`
-    pub fn push_archive_entries<R: AsyncRead + Unpin>(
+    pub async fn push_archive_entries<R: AsyncRead + Unpin>(
         &mut self,
         entries: Vec<ArchiveEntry>,
         reader: Vec<SourceReader<R>>,
@@ -254,17 +258,19 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
             }
 
             loop {
-                let n = async_io::block_on(AsyncReadExt::read(&mut r, &mut buf)).map_err(|e| {
+                let n = AsyncReadExt::read(&mut r, &mut buf).await.map_err(|e| {
                     Error::io_msg(e, format!("Encode entries:{}", entries_names(&entries)))
                 })?;
                 if n == 0 {
                     break;
                 }
-                Write::write_all(&mut w, &buf[..n]).map_err(|e| {
-                    Error::io_msg(e, format!("Encode entries:{}", entries_names(&entries)))
-                })?;
+                AsyncWriteExt::write_all(&mut w, &buf[..n])
+                    .await
+                    .map_err(|e| {
+                        Error::io_msg(e, format!("Encode entries:{}", entries_names(&entries)))
+                    })?;
             }
-            Write::flush(&mut w).map_err(|e| {
+            AsyncWriteExt::flush(&mut w).await.map_err(|e| {
                 let mut names = String::with_capacity(512);
                 for ele in entries.iter() {
                     names.push_str(&ele.name);
@@ -275,7 +281,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
                 }
                 Error::io_msg(e, format!("Encode entry:{names}"))
             })?;
-            Write::write(&mut w, &[]).map_err(|e| {
+            AsyncWriteExt::write(&mut w, &[]).await.map_err(|e| {
                 Error::io_msg(e, format!("Encode entry:{}", entries_names(&entries)))
             })?;
 
@@ -336,11 +342,11 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
     }
 
     /// Finishes the compression.
-    pub fn finish(mut self) -> std::io::Result<W> {
+    pub async fn finish(mut self) -> std::io::Result<W> {
         let mut header: Vec<u8> = Vec::with_capacity(64 * 1024);
-        self.write_encoded_header(&mut header)?;
-        let header_pos = async_io::block_on(AsyncSeekExt::stream_position(&mut self.output))?;
-        async_io::block_on(AsyncWriteExt::write_all(&mut self.output, &header))?;
+        self.write_encoded_header(&mut header).await?;
+        let header_pos = AsyncSeekExt::stream_position(&mut self.output).await?;
+        AsyncWriteExt::write_all(&mut self.output, &header).await?;
         let crc32 = crc32fast::hash(&header);
         let mut hh = [0u8; SIGNATURE_HEADER_SIZE as usize];
         {
@@ -361,9 +367,9 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
         let crc32 = crc32fast::hash(&hh[12..]);
         hh[8..12].copy_from_slice(&crc32.to_le_bytes());
 
-        async_io::block_on(AsyncSeekExt::seek(&mut self.output, SeekFrom::Start(0)))?;
-        async_io::block_on(AsyncWriteExt::write_all(&mut self.output, &hh))?;
-        async_io::block_on(AsyncWriteExt::flush(&mut self.output))?;
+        AsyncSeekExt::seek(&mut self.output, SeekFrom::Start(0)).await?;
+        AsyncWriteExt::write_all(&mut self.output, &hh).await?;
+        AsyncWriteExt::flush(&mut self.output).await?;
         Ok(self.output)
     }
 
@@ -376,12 +382,12 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
         Ok(())
     }
 
-    fn write_encoded_header<H: Write>(&mut self, header: &mut H) -> std::io::Result<()> {
+    async fn write_encoded_header<H: Write>(&mut self, header: &mut H) -> std::io::Result<()> {
         let mut raw_header = Vec::with_capacity(64 * 1024);
         self.write_header(&mut raw_header)?;
         let mut pack_info = PackInfo::default();
 
-        let position = async_io::block_on(AsyncSeekExt::stream_position(&mut self.output))?;
+        let position = AsyncSeekExt::stream_position(&mut self.output).await?;
         let pos = position - SIGNATURE_HEADER_SIZE;
         pack_info.pos = pos;
 
@@ -410,9 +416,9 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
         {
             let mut encoder = Self::create_writer(&methods, &mut compressed, &mut more_sizes)
                 .map_err(std::io::Error::other)?;
-            async_io::block_on(AsyncWriteExt::write_all(&mut encoder, &raw_header))?;
-            async_io::block_on(AsyncWriteExt::flush(&mut encoder))?;
-            let _ = async_io::block_on(AsyncWriteExt::write(&mut encoder, &[]))?;
+            AsyncWriteExt::write_all(&mut encoder, &raw_header).await?;
+            AsyncWriteExt::flush(&mut encoder).await?;
+            let _ = AsyncWriteExt::write(&mut encoder, &[]).await?;
         }
 
         let compress_crc = compressed.crc_value();
@@ -423,10 +429,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
             return Ok(());
         }
         let encoded_data = encoded_cursor.into_inner();
-        async_io::block_on(AsyncWriteExt::write_all(
-            &mut self.output,
-            &encoded_data[..compress_size],
-        ))?;
+        AsyncWriteExt::write_all(&mut self.output, &encoded_data[..compress_size]).await?;
 
         pack_info.add_stream(compress_size as u64, compress_crc);
 
@@ -588,7 +591,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveWriter<W> {
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> AutoFinish for ArchiveWriter<W> {
     fn finish_ignore_error(self) {
-        let _ = self.finish();
+        let _ = async_io::block_on(self.finish());
     }
 }
 
@@ -637,19 +640,7 @@ impl<'a, W> CompressWrapWriter<'a, W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> Write for CompressWrapWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.cache.resize(buf.len(), Default::default());
-        let len = async_io::block_on(AsyncWriteExt::write(&mut self.writer, buf))?;
-        self.crc.update(&buf[..len]);
-        *self.bytes_written += len;
-        Ok(len)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        async_io::block_on(AsyncWriteExt::flush(&mut self.writer))
-    }
-}
+/* removed sync Write impl to eliminate synchronous bridging */
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for CompressWrapWriter<'_, W> {
     fn poll_write(

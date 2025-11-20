@@ -209,7 +209,7 @@ async fn decompress_impl_async<R: AsyncRead + AsyncSeek + Unpin>(
 ) -> Result<(), Error> {
     let pos = AsyncSeekExt::stream_position(&mut src_reader).await?;
     AsyncSeekExt::seek(&mut src_reader, futures::io::SeekFrom::Start(pos)).await?;
-    let mut seven = ArchiveReader::new(src_reader, password)?;
+    let mut seven = ArchiveReader::new(src_reader, password).await?;
     let dest = PathBuf::from(dest.as_ref());
     if !dest.exists() {
         afs::create_dir_all(&dest).await?;

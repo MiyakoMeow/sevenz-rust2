@@ -188,16 +188,25 @@ fn test_compression_method(methods: &[EncoderConfiguration]) {
     let bytes: Vec<u8>;
 
     {
-        let mut writer = ArchiveWriter::new(futures::io::Cursor::new(Vec::<u8>::new())).unwrap();
+        let mut writer = smol::block_on(ArchiveWriter::new(futures::io::Cursor::new(
+            Vec::<u8>::new(),
+        )))
+        .unwrap();
         let file = ArchiveEntry::new_file("data/decompress_x86.exe");
         let directory = ArchiveEntry::new_directory("data");
 
         writer.set_content_methods(methods.to_vec());
-        writer
-            .push_archive_entry(file, Some(content.as_slice()))
-            .unwrap();
-        writer.push_archive_entry::<&[u8]>(directory, None).unwrap();
-        let cursor = writer.finish().unwrap();
+        smol::block_on(async {
+            writer
+                .push_archive_entry(file, Some(content.as_slice()))
+                .await
+                .unwrap();
+            writer
+                .push_archive_entry::<&[u8]>(directory, None)
+                .await
+                .unwrap();
+        });
+        let cursor = smol::block_on(writer.finish()).unwrap();
         bytes = cursor.into_inner();
     }
 

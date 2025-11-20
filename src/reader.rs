@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::HashMap, io, num::NonZeroUsize, rc::Rc};
+use std::{
+    cell::RefCell, collections::HashMap, future::Future, io, num::NonZeroUsize, pin::Pin, rc::Rc,
+};
 
 use std::io::{Read, Seek};
 
@@ -203,7 +205,7 @@ impl Archive {
             .await
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         let mut cursor = futures::io::Cursor::new(data);
-        Self::read(&mut cursor, &Password::empty())
+        Self::read(&mut cursor, &Password::empty()).await
     }
 
     /// Opens a 7z archive asynchronously from a filesystem path using the given password.
@@ -218,7 +220,7 @@ impl Archive {
             .await
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         let mut cursor = futures::io::Cursor::new(data);
-        Self::read(&mut cursor, password)
+        Self::read(&mut cursor, password).await
     }
 
     /// Read 7z file archive info use the specified `reader`.
@@ -239,20 +241,20 @@ impl Archive {
     ///     println!("{}", entry.name());
     /// }
     /// ```
-    pub(crate) fn read<R: AsyncRead + AsyncSeek + Unpin>(
+    pub(crate) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut R,
         password: &Password,
     ) -> Result<Archive, Error> {
-        let reader_len = async_io::block_on(AsyncSeekExt::seek(reader, SeekFrom::End(0)))?;
-        async_io::block_on(AsyncSeekExt::seek(reader, SeekFrom::Start(0)))?;
+        let reader_len = AsyncSeekExt::seek(reader, SeekFrom::End(0)).await?;
+        AsyncSeekExt::seek(reader, SeekFrom::Start(0)).await?;
 
         let mut signature = [0; 6];
-        async_io::block_on(AsyncReadExt::read_exact(reader, &mut signature))?;
+        AsyncReadExt::read_exact(reader, &mut signature).await?;
         if signature != SEVEN_Z_SIGNATURE {
             return Err(Error::BadSignature(signature));
         }
         let mut versions = [0; 2];
-        async_io::block_on(AsyncReadExt::read_exact(reader, &mut versions))?;
+        AsyncReadExt::read_exact(reader, &mut versions).await?;
         let version_major = versions[0];
         let version_minor = versions[1];
         if version_major != 0 {
@@ -264,36 +266,33 @@ impl Archive {
 
         let start_header_crc = {
             let mut buf = [0u8; 4];
-            async_io::block_on(futures::io::AsyncReadExt::read_exact(reader, &mut buf))?;
+            AsyncReadExt::read_exact(reader, &mut buf).await?;
             u32::from_le_bytes(buf)
         };
 
         let header_valid = if start_header_crc == 0 {
-            let current_position = async_io::block_on(AsyncSeekExt::stream_position(reader))?;
+            let current_position = AsyncSeekExt::stream_position(reader).await?;
             let mut buf = [0; 20];
-            async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf))?;
-            async_io::block_on(AsyncSeekExt::seek(
-                reader,
-                SeekFrom::Start(current_position),
-            ))?;
+            AsyncReadExt::read_exact(reader, &mut buf).await?;
+            AsyncSeekExt::seek(reader, SeekFrom::Start(current_position)).await?;
             buf.iter().any(|a| *a != 0)
         } else {
             true
         };
         if header_valid {
-            let start_header = Self::read_start_header(reader, start_header_crc)?;
-            Self::init_archive(reader, start_header, password, true, 1)
+            let start_header = Self::read_start_header(reader, start_header_crc).await?;
+            Self::init_archive(reader, start_header, password, true, 1).await
         } else {
-            Self::try_to_locale_end_header(reader, reader_len, password, 1)
+            Self::try_to_locale_end_header(reader, reader_len, password, 1).await
         }
     }
 
-    fn read_start_header<R: AsyncRead + Unpin>(
+    async fn read_start_header<R: AsyncRead + Unpin>(
         reader: &mut R,
         start_header_crc: u32,
     ) -> Result<StartHeader, Error> {
         let mut buf = [0; 20];
-        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf))?;
+        AsyncReadExt::read_exact(reader, &mut buf).await?;
         let crc32 = crc32fast::hash(&buf);
         if crc32 != start_header_crc {
             return Err(Error::ChecksumVerificationFailed);
@@ -345,16 +344,16 @@ impl Archive {
         Ok(())
     }
 
-    fn try_to_locale_end_header<R: AsyncRead + AsyncSeek + Unpin>(
+    async fn try_to_locale_end_header<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut R,
         reader_len: u64,
         password: &Password,
         thread_count: u32,
     ) -> Result<Self, Error> {
         let search_limit = 1024 * 1024;
-        let prev_data_size = async_io::block_on(AsyncSeekExt::stream_position(reader))? + 20;
+        let prev_data_size = AsyncSeekExt::stream_position(reader).await? + 20;
         let size = reader_len;
-        let cur_pos = async_io::block_on(AsyncSeekExt::stream_position(reader))?;
+        let cur_pos = AsyncSeekExt::stream_position(reader).await?;
         let min_pos = if cur_pos + search_limit > size {
             cur_pos
         } else {
@@ -364,10 +363,10 @@ impl Archive {
         while pos > min_pos {
             pos -= 1;
 
-            async_io::block_on(AsyncSeekExt::seek(reader, SeekFrom::Start(pos)))?;
+            AsyncSeekExt::seek(reader, SeekFrom::Start(pos)).await?;
             let nid = {
                 let mut buf = [0u8; 1];
-                async_io::block_on(futures::io::AsyncReadExt::read_exact(reader, &mut buf))?;
+                AsyncReadExt::read_exact(reader, &mut buf).await?;
                 buf[0]
             };
             if nid == K_ENCODED_HEADER || nid == K_HEADER {
@@ -377,7 +376,7 @@ impl Archive {
                     next_header_crc: 0,
                 };
                 let result =
-                    Self::init_archive(reader, start_header, password, false, thread_count)?;
+                    Self::init_archive(reader, start_header, password, false, thread_count).await?;
 
                 if !result.files.is_empty() {
                     return Ok(result);
@@ -389,7 +388,7 @@ impl Archive {
         ))
     }
 
-    fn init_archive<R: AsyncRead + AsyncSeek + Unpin>(
+    async fn init_archive<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut R,
         start_header: StartHeader,
         password: &Password,
@@ -405,13 +404,14 @@ impl Archive {
 
         let next_header_size_int = start_header.next_header_size as usize;
 
-        async_io::block_on(AsyncSeekExt::seek(
+        AsyncSeekExt::seek(
             reader,
             SeekFrom::Start(SIGNATURE_HEADER_SIZE + start_header.next_header_offset),
-        ))?;
+        )
+        .await?;
 
         let mut buf = vec![0; next_header_size_int];
-        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf))?;
+        AsyncReadExt::read_exact(reader, &mut buf).await?;
         if verify_crc && crc32fast::hash(&buf) as u64 != start_header.next_header_crc {
             return Err(Error::NextHeaderCrcMismatch);
         }
@@ -1171,21 +1171,21 @@ impl ArchiveReader<futures::io::Cursor<Vec<u8>>> {
             .await
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         let cursor = futures::io::Cursor::new(data);
-        Self::new(cursor, password)
+        Self::new(cursor, password).await
     }
 
     /// Opens a 7z archive from in-memory bytes asynchronously.
     pub async fn open_from_bytes_async(data: Vec<u8>, password: Password) -> Result<Self, Error> {
         let cursor = futures::io::Cursor::new(data);
-        Self::new(cursor, password)
+        Self::new(cursor, password).await
     }
 }
 
 impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R> {
     /// Creates a [`ArchiveReader`] to read a 7z archive file from the given `source` reader.
     #[inline]
-    pub(crate) fn new(mut source: R, password: Password) -> Result<Self, Error> {
-        let archive = Archive::read(&mut source, &password)?;
+    pub(crate) async fn new(mut source: R, password: Password) -> Result<Self, Error> {
+        let archive = Archive::read(&mut source, &password).await?;
 
         let mut reader = Self {
             source,
@@ -1549,6 +1549,46 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
         Ok(())
     }
 
+    pub async fn for_each_entries_async<
+        F: for<'a> FnMut(
+            &'a ArchiveEntry,
+            &'a mut (dyn futures::io::AsyncRead + Unpin + 'a),
+        ) -> Pin<Box<dyn Future<Output = Result<bool, Error>> + 'a>>,
+    >(
+        &mut self,
+        mut each: F,
+    ) -> Result<(), Error> {
+        let block_count = self.archive.blocks.len();
+        for block_index in 0..block_count {
+            let forder_dec = BlockDecoder::new(
+                self.thread_count,
+                block_index,
+                &self.archive,
+                &self.password,
+                &mut self.source,
+            );
+            if !forder_dec
+                .for_each_entries_async(&mut each)
+                .await
+                .map_err(|e| e.maybe_bad_password(!self.password.is_empty()))?
+            {
+                return Ok(());
+            }
+        }
+        // decode empty files
+        for file_index in 0..self.archive.files.len() {
+            let block_index = self.archive.stream_map.file_block_index[file_index];
+            if block_index.is_none() {
+                let file = &self.archive.files[file_index];
+                let mut empty_reader = AsyncStdRead::new([0u8; 0].as_slice());
+                if !each(file, &mut empty_reader).await? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the data of a file with the given path inside the archive.
     ///
     /// # Notice
@@ -1774,6 +1814,62 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> BlockDecoder<'a, R> {
             } else {
                 let mut empty_reader = AsyncStdRead::new([0u8; 0].as_slice());
                 if !each(file, &mut empty_reader)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    pub async fn for_each_entries_async<
+        F: for<'b> FnMut(
+            &'b ArchiveEntry,
+            &'b mut (dyn futures::io::AsyncRead + Unpin + 'b),
+        ) -> Pin<Box<dyn Future<Output = Result<bool, Error>> + 'b>>,
+    >(
+        self,
+        each: &mut F,
+    ) -> Result<bool, Error> {
+        let Self {
+            thread_count,
+            block_index,
+            archive,
+            password,
+            source,
+        } = self;
+        let (mut block_reader, _size) = ArchiveReader::build_decode_stack(
+            source,
+            archive,
+            block_index,
+            password,
+            thread_count,
+        )?;
+        let start = archive.stream_map.block_first_file_index[block_index];
+        let file_count = archive.blocks[block_index].num_unpack_sub_streams;
+
+        for file_index in start..(file_count + start) {
+            let file = &archive.files[file_index];
+            if file.has_stream && file.size > 0 {
+                let mut decoder: Box<dyn futures::io::AsyncRead + Unpin> =
+                    Box::new(BoundedReader::new(&mut block_reader, file.size as usize));
+                if file.has_crc {
+                    decoder = Box::new(Crc32VerifyingReader::new(
+                        decoder,
+                        file.size as usize,
+                        file.crc,
+                    ));
+                }
+                {
+                    let cont = each(file, &mut decoder)
+                        .await
+                        .map_err(|e| e.maybe_bad_password(!password.is_empty()))?;
+                    if !cont {
+                        return Ok(false);
+                    }
+                }
+            } else {
+                let mut empty_reader = AsyncStdRead::new([0u8; 0].as_slice());
+                if !each(file, &mut empty_reader).await? {
                     return Ok(false);
                 }
             }
