@@ -248,12 +248,14 @@ fn test_bcj2() {
         let mut cursor = futures::io::Cursor::new(data);
         let fd = BlockDecoder::new(1, i, &archive, &password, &mut cursor);
         println!("entry_count:{}", fd.entry_count());
-        fd.for_each_entries(&mut |entry, reader| {
+        smol::block_on(fd.for_each_entries_async(&mut |entry, reader| {
             println!("{}=>{:?}", entry.has_stream, entry.name());
-            let mut buf = Vec::new();
-            async_io::block_on(futures::io::AsyncReadExt::read_to_end(reader, &mut buf))?;
-            Ok(true)
-        })
+            Box::pin(async move {
+                let mut buf = Vec::new();
+                futures::io::AsyncReadExt::read_to_end(reader, &mut buf).await?;
+                Ok(true)
+            })
+        }))
         .unwrap();
     }
 }
@@ -308,8 +310,8 @@ fn test_get_file_by_path() {
         .collect();
 
     for path in paths.iter() {
-        let data0 = non_solid_reader.read_file(path.as_str()).unwrap();
-        let data1 = solid_reader.read_file(path.as_str()).unwrap();
+        let data0 = smol::block_on(non_solid_reader.read_file_async(path.as_str())).unwrap();
+        let data1 = smol::block_on(solid_reader.read_file_async(path.as_str())).unwrap();
 
         assert!(!data0.is_empty());
         assert!(!data1.is_empty());

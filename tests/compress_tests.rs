@@ -249,7 +249,7 @@ fn test_compression_method(methods: &[EncoderConfiguration]) {
             .any(|file| file.name() == "data/decompress_x86.exe")
     );
 
-    let data = reader.read_file("data/decompress_x86.exe").unwrap();
+    let data = smol::block_on(reader.read_file_async("data/decompress_x86.exe")).unwrap();
 
     fn hash(data: &[u8]) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

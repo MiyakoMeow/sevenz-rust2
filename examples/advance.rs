@@ -61,14 +61,18 @@ fn main() {
     .expect("create reader ok");
     assert_eq!(contents.len(), sz.archive().files.len());
     assert_eq!(1, sz.archive().blocks.len());
-    sz.for_each_entries(|entry, reader| {
-        let mut buf = Vec::new();
-        async_io::block_on(futures::io::AsyncReadExt::read_to_end(reader, &mut buf))?;
-        let content = String::from_utf8(buf).unwrap();
-        assert_eq!(content, contents[entry.name()]);
-        Ok(true)
-    })
-    .expect("decompress ok");
+    let names: Vec<String> = sz
+        .archive()
+        .files
+        .iter()
+        .filter(|f| !f.is_directory)
+        .map(|f| f.name().to_string())
+        .collect();
+    for name in names {
+        let data = smol::block_on(sz.read_file_async(&name)).expect("read file ok");
+        let content = String::from_utf8(data).unwrap();
+        assert_eq!(content, contents[&name].to_string());
+    }
     let _ = std::fs::remove_file(dest);
 }
 

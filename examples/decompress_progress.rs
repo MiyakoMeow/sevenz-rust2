@@ -17,7 +17,7 @@ fn main() {
             .map(|e| e.size())
             .sum::<u64>()
     };
-    let mut uncompressed_size = 0usize;
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     let dest = PathBuf::from("examples/data/sample");
 
     smol::block_on(async {
@@ -26,7 +26,8 @@ fn main() {
             Cursor::new(data),
             &dest,
             Password::from("pass"),
-            |entry, reader, dest| {
+            move |entry, reader, dest| {
+                let progress = progress.clone();
                 Box::pin(async move {
                     let path = dest.join(entry.name());
                     if let Some(parent) = path.parent() {
@@ -40,11 +41,10 @@ fn main() {
                             break;
                         }
                         data.extend_from_slice(&buf[..n]);
-                        uncompressed_size += n;
-                        println!(
-                            "progress:{:.2}%",
-                            (uncompressed_size as f64 / total_size as f64) * 100f64
-                        );
+                        let total = total_size;
+                        let mut g = progress.lock().unwrap();
+                        *g += n;
+                        println!("progress:{:.2}%", (*g as f64 / total as f64) * 100f64);
                     }
                     async_fs::write(&path, &data).await.unwrap();
                     Ok(true)

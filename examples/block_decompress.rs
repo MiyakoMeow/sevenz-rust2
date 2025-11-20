@@ -28,21 +28,21 @@ fn main() {
         }
         let dest = PathBuf::from("examples/data/sample_mt/");
 
-        forder_dec
-            .for_each_entries(&mut |entry, reader| {
-                if entry.name() == my_file_name {
-                    //only extract the file we want
-                    let dest = dest.join(entry.name());
-                    async_io::block_on(sevenz_rust2::default_entry_extract_fn_async(
-                        entry, reader, &dest,
-                    ))?;
-                } else {
-                    //skip other files
+        smol::block_on(forder_dec.for_each_entries_async(&mut |entry, reader| {
+            if entry.name() == my_file_name {
+                let dest = dest.join(entry.name());
+                Box::pin(async move {
+                    sevenz_rust2::default_entry_extract_fn_async(entry, reader, &dest).await?;
+                    Ok(true)
+                })
+            } else {
+                Box::pin(async move {
                     let mut buf = Vec::new();
-                    async_io::block_on(futures::io::AsyncReadExt::read_to_end(reader, &mut buf))?;
-                }
-                Ok(true)
-            })
-            .expect("ok");
+                    futures::io::AsyncReadExt::read_to_end(reader, &mut buf).await?;
+                    Ok(true)
+                })
+            }
+        }))
+        .expect("ok");
     }
 }

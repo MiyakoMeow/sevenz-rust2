@@ -104,33 +104,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for Decoder<R> {
     }
 }
 
-impl<R: AsyncRead + Unpin> Read for Decoder<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Decoder::Copy(r) => async_io::block_on(AsyncReadExt::read(r, buf)),
-            Decoder::Lzma(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            Decoder::Lzma2(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            Decoder::Lzma2Mt(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "ppmd")]
-            Decoder::Ppmd(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            Decoder::Bcj(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            Decoder::Delta(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "brotli")]
-            Decoder::Brotli(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "bzip2")]
-            Decoder::Bzip2(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "deflate")]
-            Decoder::Deflate(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "lz4")]
-            Decoder::Lz4(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "zstd")]
-            Decoder::Zstd(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-            #[cfg(feature = "aes256")]
-            Decoder::Aes256Sha256(r) => async_io::block_on(AsyncReadExt::read(r.as_mut(), buf)),
-        }
-    }
-}
-
 pub(crate) struct AsyncStdRead<D> {
     inner: D,
 }

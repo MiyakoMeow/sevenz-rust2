@@ -35,18 +35,6 @@ impl<R: AsyncRead + Unpin> BoundedReader<R> {
     }
 }
 
-impl<R: AsyncRead + Unpin> Read for BoundedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.remain == 0 {
-            return Ok(0);
-        }
-        let bound = buf.len().min(self.remain);
-        let size = async_io::block_on(AsyncReadExt::read(&mut self.inner, &mut buf[..bound]))?;
-        self.remain -= size;
-        Ok(size)
-    }
-}
-
 impl<R: AsyncRead + Unpin> futures::io::AsyncRead for BoundedReader<R> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -84,38 +72,33 @@ impl<'a, R> Clone for SharedBoundedReader<'a, R> {
     }
 }
 
-impl<'a, R: AsyncRead + AsyncSeek + Unpin> Seek for SharedBoundedReader<'a, R> {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(pos) => self.bounds.0 as i64 + pos as i64,
-            SeekFrom::End(pos) => self.bounds.1 as i64 + pos,
-            SeekFrom::Current(pos) => self.cur as i64 + pos,
-        };
-        if new_pos < 0 {
-            return Err(io::Error::other("SeekBeforeStart"));
-        }
-        self.cur = new_pos as u64;
-        async_io::block_on(AsyncSeekExt::seek(
-            &mut *self.inner.borrow_mut(),
-            SeekFrom::Start(self.cur),
-        ))
-    }
-}
-
-impl<'a, R: AsyncRead + AsyncSeek + Unpin> Read for SharedBoundedReader<'a, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl<'a, R: AsyncRead + AsyncSeek + Unpin> futures::io::AsyncRead for SharedBoundedReader<'a, R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         if self.cur >= self.bounds.1 {
-            return Ok(0);
+            return std::task::Poll::Ready(Ok(0));
         }
-
+        let cur = self.cur;
         let mut inner = self.inner.borrow_mut();
-
-        async_io::block_on(AsyncSeekExt::seek(&mut *inner, SeekFrom::Start(self.cur)))?;
-
-        let bound = buf.len().min((self.bounds.1 - self.cur) as usize);
-        let size = async_io::block_on(AsyncReadExt::read(&mut *inner, &mut buf[..bound]))?;
-        self.cur += size as u64;
-        Ok(size)
+        match std::pin::Pin::new(&mut *inner).poll_seek(cx, SeekFrom::Start(cur)) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(_)) => {}
+            std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+        }
+        let bound = buf.len().min((self.bounds.1 - cur) as usize);
+        let poll = std::pin::Pin::new(&mut *inner).poll_read(cx, &mut buf[..bound]);
+        drop(inner);
+        match poll {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(size)) => {
+                self.cur += size as u64;
+                std::task::Poll::Ready(Ok(size))
+            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+        }
     }
 }
 
@@ -426,11 +409,12 @@ impl Archive {
                 &mut archive,
                 password,
                 thread_count,
-            )?;
+            )
+            .await?;
             buf.clear();
             buf.resize(buf_size, 0);
-            out_reader
-                .read_exact(&mut buf)
+            AsyncReadExt::read_exact(&mut out_reader, &mut buf)
+                .await
                 .map_err(|e| Error::bad_password(e, !password.is_empty()))?;
             archive = Archive::default();
             buf_reader = buf.as_slice();
@@ -454,13 +438,13 @@ impl Archive {
         Ok(archive)
     }
 
-    fn read_encoded_header<'r, R: Read, RI: 'r + AsyncRead + AsyncSeek + Unpin>(
-        header: &mut R,
+    async fn read_encoded_header<'r, RI: 'r + AsyncRead + AsyncSeek + Unpin>(
+        header: &mut impl Read,
         reader: &'r mut RI,
         archive: &mut Archive,
         password: &Password,
         thread_count: u32,
-    ) -> Result<(Box<dyn Read + 'r>, usize), Error> {
+    ) -> Result<(Box<dyn futures::io::AsyncRead + Unpin + 'r>, usize), Error> {
         Self::read_streams_info(header, archive)?;
         let block = archive
             .blocks
@@ -472,12 +456,12 @@ impl Archive {
             return Err(Error::other("no packed streams, can't read encoded header"));
         }
 
-        async_io::block_on(AsyncSeekExt::seek(reader, SeekFrom::Start(block_offset)))?;
+        AsyncSeekExt::seek(reader, SeekFrom::Start(block_offset)).await?;
         let coder_len = block.coders.len();
         let unpack_size = block.get_unpack_size() as usize;
         let pack_size = archive.pack_sizes[first_pack_stream_index] as usize;
-        let input_reader = BoundedReader::new(reader, pack_size);
-        let mut decoder: Box<dyn Read> = Box::new(input_reader);
+        let mut decoder: Box<dyn futures::io::AsyncRead + Unpin> =
+            Box::new(BoundedReader::new(reader, pack_size));
         let mut decoder = if coder_len > 0 {
             for (index, coder) in block.ordered_coder_iter() {
                 if coder.num_in_streams != 1 || coder.num_out_streams != 1 {
@@ -486,7 +470,7 @@ impl Archive {
                     ));
                 }
                 let next = add_decoder(
-                    AsyncStdRead::new(decoder),
+                    decoder,
                     block.get_unpack_size_at_index(index) as usize,
                     coder,
                     password,
@@ -1264,7 +1248,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
         &self.archive
     }
 
-    fn build_decode_stack<'r>(
+    async fn build_decode_stack<'r>(
         source: &'r mut R,
         archive: &Archive,
         block_index: usize,
@@ -1299,10 +1283,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
             }
         }
 
-        async_io::block_on(futures::io::AsyncSeekExt::seek(
-            source,
-            futures::io::SeekFrom::Start(block_offset),
-        ))?;
+        AsyncSeekExt::seek(source, SeekFrom::Start(block_offset)).await?;
         let pack_size = archive.pack_sizes[first_pack_stream_index] as usize;
 
         let mut decoder: Box<dyn futures::io::AsyncRead + Unpin> =
@@ -1449,7 +1430,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
             .iter()
             .position(|&i| i == in_stream_index as u64);
         if let Some(index) = index {
-            return Ok(Box::new(AsyncStdRead::new(sources[index].clone())));
+            return Ok(Box::new(sources[index].clone()));
         }
 
         let bp = block
@@ -1513,42 +1494,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
         ))
     }
 
-    /// Takes a closure to decode each files in the archive.
-    ///
-    /// Attention about solid archive:
-    /// When decoding a solid archive, the data to be decompressed depends on the data in front of it,
-    /// you cannot simply skip the previous data and only decompress the data in the back.
-    pub fn for_each_entries<
-        F: FnMut(&ArchiveEntry, &mut (dyn futures::io::AsyncRead + Unpin)) -> Result<bool, Error>,
-    >(
-        &mut self,
-        mut each: F,
-    ) -> Result<(), Error> {
-        let block_count = self.archive.blocks.len();
-        for block_index in 0..block_count {
-            let forder_dec = BlockDecoder::new(
-                self.thread_count,
-                block_index,
-                &self.archive,
-                &self.password,
-                &mut self.source,
-            );
-            forder_dec.for_each_entries(&mut each)?;
-        }
-        // decode empty files
-        for file_index in 0..self.archive.files.len() {
-            let block_index = self.archive.stream_map.file_block_index[file_index];
-            if block_index.is_none() {
-                let file = &self.archive.files[file_index];
-                let mut empty_reader = AsyncStdRead::new([0u8; 0].as_slice());
-                if !each(file, &mut empty_reader)? {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
-    }
-
+    #[allow(missing_docs)]
     pub async fn for_each_entries_async<
         F: for<'a> FnMut(
             &'a ArchiveEntry,
@@ -1594,7 +1540,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
     /// # Notice
     /// This function is very inefficient when used with solid archives, since
     /// it needs to decode all data before the actual file.
-    pub fn read_file(&mut self, name: &str) -> Result<Vec<u8>, Error> {
+    pub async fn read_file_async(&mut self, name: &str) -> Result<Vec<u8>, Error> {
         let index_entry = *self.index.get(name).ok_or(Error::FileNotFound)?;
         let file = &self.archive.files[index_entry.file_index];
 
@@ -1608,7 +1554,8 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
 
         match self.archive.is_solid {
             true => {
-                let mut result = None;
+                use std::rc::Rc;
+                let result_cell: Rc<RefCell<Option<Vec<u8>>>> = Rc::new(RefCell::new(None));
                 let target_file_ptr = file as *const _;
 
                 BlockDecoder::new(
@@ -1618,29 +1565,29 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
                     &self.password,
                     &mut self.source,
                 )
-                .for_each_entries(&mut |archive_entry, reader| {
-                    let mut data = Vec::with_capacity(archive_entry.size as usize);
-                    async_io::block_on(futures::io::AsyncReadExt::read_to_end(reader, &mut data))?;
+                .for_each_entries_async(&mut |archive_entry, reader| {
+                    let result_cell = Rc::clone(&result_cell);
+                    Box::pin(async move {
+                        let mut data = Vec::with_capacity(archive_entry.size as usize);
+                        AsyncReadExt::read_to_end(reader, &mut data).await?;
+                        if std::ptr::eq(archive_entry, target_file_ptr) {
+                            *result_cell.borrow_mut() = Some(data);
+                            Ok(false)
+                        } else {
+                            Ok(true)
+                        }
+                    })
+                })
+                .await?;
 
-                    if std::ptr::eq(archive_entry, target_file_ptr) {
-                        result = Some(data);
-                        Ok(false)
-                    } else {
-                        Ok(true)
-                    }
-                })?;
-
-                result.ok_or(Error::FileNotFound)
+                result_cell.borrow_mut().take().ok_or(Error::FileNotFound)
             }
             false => {
                 let pack_index = self.archive.stream_map.block_first_pack_stream_index[block_index];
                 let pack_offset = self.archive.stream_map.pack_stream_offsets[pack_index];
                 let block_offset = SIGNATURE_HEADER_SIZE + self.archive.pack_pos + pack_offset;
 
-                async_io::block_on(futures::io::AsyncSeekExt::seek(
-                    &mut self.source,
-                    futures::io::SeekFrom::Start(block_offset),
-                ))?;
+                AsyncSeekExt::seek(&mut self.source, SeekFrom::Start(block_offset)).await?;
 
                 let (mut block_reader, _size) = Self::build_decode_stack(
                     &mut self.source,
@@ -1648,7 +1595,8 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
                     block_index,
                     &self.password,
                     self.thread_count,
-                )?;
+                )
+                .await?;
 
                 let mut data = Vec::with_capacity(file.size as usize);
                 let mut decoder: Box<dyn futures::io::AsyncRead + Unpin> =
@@ -1662,10 +1610,7 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
                     ));
                 }
 
-                async_io::block_on(futures::io::AsyncReadExt::read_to_end(
-                    &mut decoder,
-                    &mut data,
-                ))?;
+                AsyncReadExt::read_to_end(&mut decoder, &mut data).await?;
 
                 Ok(data)
             }
@@ -1771,56 +1716,6 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> BlockDecoder<'a, R> {
     /// it, you cannot simply skip the previous data and only decompress the data in the back.
     ///
     /// Non-solid archives use one block per file and allow more effective decoding of single files.
-    pub fn for_each_entries<
-        F: FnMut(&ArchiveEntry, &mut (dyn futures::io::AsyncRead + Unpin)) -> Result<bool, Error>,
-    >(
-        self,
-        each: &mut F,
-    ) -> Result<bool, Error> {
-        let Self {
-            thread_count,
-            block_index,
-            archive,
-            password,
-            source,
-        } = self;
-        let (mut block_reader, _size) = ArchiveReader::build_decode_stack(
-            source,
-            archive,
-            block_index,
-            password,
-            thread_count,
-        )?;
-        let start = archive.stream_map.block_first_file_index[block_index];
-        let file_count = archive.blocks[block_index].num_unpack_sub_streams;
-
-        for file_index in start..(file_count + start) {
-            let file = &archive.files[file_index];
-            if file.has_stream && file.size > 0 {
-                let mut decoder: Box<dyn futures::io::AsyncRead + Unpin> =
-                    Box::new(BoundedReader::new(&mut block_reader, file.size as usize));
-                if file.has_crc {
-                    decoder = Box::new(Crc32VerifyingReader::new(
-                        decoder,
-                        file.size as usize,
-                        file.crc,
-                    ));
-                }
-                if !each(file, &mut decoder)
-                    .map_err(|e| e.maybe_bad_password(!self.password.is_empty()))?
-                {
-                    return Ok(false);
-                }
-            } else {
-                let mut empty_reader = AsyncStdRead::new([0u8; 0].as_slice());
-                if !each(file, &mut empty_reader)? {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
-    }
-
     pub async fn for_each_entries_async<
         F: for<'b> FnMut(
             &'b ArchiveEntry,
@@ -1837,13 +1732,9 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> BlockDecoder<'a, R> {
             password,
             source,
         } = self;
-        let (mut block_reader, _size) = ArchiveReader::build_decode_stack(
-            source,
-            archive,
-            block_index,
-            password,
-            thread_count,
-        )?;
+        let (mut block_reader, _size) =
+            ArchiveReader::build_decode_stack(source, archive, block_index, password, thread_count)
+                .await?;
         let start = archive.stream_map.block_first_file_index[block_index];
         let file_count = archive.blocks[block_index].num_unpack_sub_streams;
 
