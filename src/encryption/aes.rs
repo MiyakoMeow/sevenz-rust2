@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -167,7 +166,7 @@ impl Cipher {
         })
     }
 
-    fn update<W: Write>(&mut self, mut data: &mut [u8], mut output: W) -> std::io::Result<usize> {
+    fn update(&mut self, mut data: &mut [u8], output: &mut Vec<u8>) -> std::io::Result<usize> {
         let mut n = 0;
         if !self.buf.is_empty() {
             assert!(self.buf.len() < 16);
@@ -177,7 +176,7 @@ impl Cipher {
             let block = GenericArray::from_mut_slice(&mut self.buf);
             self.dec.decrypt_block_mut(block);
             let out = block.as_slice();
-            output.write_all(out)?;
+            output.extend_from_slice(out);
             n += out.len();
             self.buf.clear();
         }
@@ -190,7 +189,7 @@ impl Cipher {
             let block = GenericArray::from_mut_slice(a);
             self.dec.decrypt_block_mut(block);
             let out = block.as_slice();
-            output.write_all(out)?;
+            output.extend_from_slice(out);
             n += out.len();
         }
         Ok(n)
@@ -238,75 +237,9 @@ impl<W> Aes256Sha256Encoder<W> {
             write_size: 0,
         })
     }
-
-    #[inline(always)]
-    fn write_block(&mut self, block: &mut [u8]) -> std::io::Result<()>
-    where
-        W: Write,
-    {
-        let block2 = GenericArray::from_mut_slice(block);
-        self.enc.encrypt_block_mut(block2);
-        self.output.write_all(block)?;
-        self.write_size += block.len() as u32;
-        Ok(())
-    }
 }
 
 #[cfg(feature = "compress")]
-impl<W: Write> Write for Aes256Sha256Encoder<W> {
-    fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
-        if self.finished && !buf.is_empty() {
-            return Ok(0);
-        }
-        if buf.is_empty() {
-            self.finished = true;
-            self.flush()?;
-            return self.output.write(buf);
-        }
-        let len = buf.len();
-        if !self.buffer.is_empty() {
-            assert!(self.buffer.len() < 16);
-            if buf.len() + self.buffer.len() >= 16 {
-                let buffer = &self.buffer[..];
-                let end = 16 - buffer.len();
-
-                let mut block = [0u8; 16];
-                block[0..buffer.len()].copy_from_slice(buffer);
-                block[buffer.len()..16].copy_from_slice(&buf[..end]);
-                self.write_block(&mut block)?;
-                self.buffer.clear();
-                buf = &buf[end..];
-            } else {
-                self.buffer.extend_from_slice(buf);
-                return Ok(len);
-            }
-        }
-
-        for data in buf.chunks(16) {
-            if data.len() < 16 {
-                self.buffer.extend_from_slice(data);
-                break;
-            }
-            let mut block = [0u8; 16];
-            block.copy_from_slice(data);
-            self.write_block(&mut block)?;
-        }
-
-        Ok(len)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if !self.buffer.is_empty() && self.finished {
-            assert!(self.buffer.len() < 16);
-            let mut block = [0u8; 16];
-            block[..self.buffer.len()].copy_from_slice(&self.buffer);
-            self.write_block(&mut block)?;
-            self.buffer.clear();
-        }
-        Ok(())
-    }
-}
-
 #[cfg(feature = "compress")]
 impl<W: AsyncWrite + Unpin> AsyncWrite for Aes256Sha256Encoder<W> {
     fn poll_write(
@@ -501,8 +434,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Aes256Sha256Encoder<W> {
 
 #[cfg(all(test, feature = "compress"))]
 mod tests {
-    use futures::io::AsyncReadExt;
-    use std::io::Cursor;
+    use futures::io::{AsyncReadExt, AsyncWriteExt, Cursor};
 
     use super::*;
 
@@ -514,12 +446,11 @@ mod tests {
         let options = AesEncoderOptions::new(password.clone());
         let mut enc = Aes256Sha256Encoder::new(writer, &options).unwrap();
         let original = include_bytes!("aes.rs");
-        enc.write_all(original).expect("encode data");
-        let _ = enc.write(&[]).unwrap();
+        smol::block_on(AsyncWriteExt::write_all(&mut enc, original)).unwrap();
+        let _ = smol::block_on(AsyncWriteExt::write(&mut enc, &[])).unwrap();
 
-        let mut encoded_data = &encoded[..];
-        let mut dec =
-            Aes256Sha256Decoder::new(&mut encoded_data, &options.properties(), &password).unwrap();
+        let cursor = Cursor::new(&encoded[..]);
+        let mut dec = Aes256Sha256Decoder::new(cursor, &options.properties(), &password).unwrap();
 
         let mut decoded = vec![];
         async_io::block_on(AsyncReadExt::read_to_end(&mut dec, &mut decoded)).unwrap();

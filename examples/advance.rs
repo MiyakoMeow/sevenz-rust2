@@ -7,9 +7,9 @@ fn main() {
     let temp_dir = temp_dir();
     let src = temp_dir.join("compress/advance");
     if src.exists() {
-        let _ = std::fs::remove_dir_all(&src);
+        let _ = smol::block_on(async_fs::remove_dir_all(&src));
     }
-    let _ = std::fs::create_dir_all(&src);
+    let _ = smol::block_on(async_fs::create_dir_all(&src));
     let file_count = 100;
     let mut contents = HashMap::with_capacity(file_count);
     let mut unpack_size = 0;
@@ -21,7 +21,7 @@ fn main() {
             contents.insert(format!("file{i}.txt"), c);
         }
         for (filename, content) in contents.iter() {
-            let _ = std::fs::write(src.join(filename), content);
+            let _ = smol::block_on(async_fs::write(src.join(filename), content));
         }
     }
     let dest = temp_dir.join("compress/compress.7z");
@@ -44,11 +44,10 @@ fn main() {
     }
     println!("compress took {:?}/{:?}", time.elapsed(), dest);
     if src.exists() {
-        let _ = std::fs::remove_dir_all(&src);
+        let _ = smol::block_on(async_fs::remove_dir_all(&src));
     }
     assert!(dest.exists());
-    let dest_file = std::fs::File::open(&dest).unwrap();
-    let m = dest_file.metadata().unwrap();
+    let m = smol::block_on(async_fs::metadata(&dest)).unwrap();
     println!("src  file len:{unpack_size:?}");
     println!("dest file len:{:?}", m.len());
     println!("ratio:{:?}", m.len() as f64 / unpack_size as f64);
@@ -70,7 +69,7 @@ fn main() {
         let content = String::from_utf8(data).unwrap();
         assert_eq!(content, contents[&name].to_string());
     }
-    let _ = std::fs::remove_file(dest);
+    let _ = smol::block_on(async_fs::remove_file(dest));
 }
 
 fn gen_random_contents(len: usize) -> String {

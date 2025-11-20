@@ -2,19 +2,19 @@
 use sevenz_rust2::*;
 #[cfg(feature = "compress")]
 use tempfile::*;
-
+#[cfg(feature = "compress")]
 #[cfg(feature = "compress")]
 #[test]
 fn compress_multi_files_solid() {
     let temp_dir = tempdir().unwrap();
     let folder = temp_dir.path().join("folder");
-    std::fs::create_dir(&folder).unwrap();
+    smol::block_on(async_fs::create_dir(&folder)).unwrap();
     let mut files = Vec::with_capacity(100);
     let mut contents = Vec::with_capacity(100);
     for i in 1..=10000 {
         let name = format!("file{i}.txt");
         let content = format!("file{i} with content");
-        std::fs::write(folder.join(&name), &content).unwrap();
+        smol::block_on(async_fs::write(folder.join(&name), &content)).unwrap();
         files.push(name);
         contents.push(content);
     }
@@ -37,7 +37,10 @@ fn compress_multi_files_solid() {
         let content = &contents[i];
         let decompress_file = decompress_dest.join(name);
         assert!(decompress_file.exists());
-        assert_eq!(&std::fs::read_to_string(&decompress_file).unwrap(), content);
+        assert_eq!(
+            &smol::block_on(async_fs::read_to_string(&decompress_file)).unwrap(),
+            content
+        );
     }
 }
 
@@ -46,13 +49,13 @@ fn compress_multi_files_solid() {
 fn compress_multi_files_mix_solid_and_non_solid() {
     let temp_dir = tempdir().unwrap();
     let folder = temp_dir.path().join("folder");
-    std::fs::create_dir(&folder).unwrap();
+    smol::block_on(async_fs::create_dir(&folder)).unwrap();
     let mut files = Vec::with_capacity(100);
     let mut contents = Vec::with_capacity(100);
     for i in 1..=100 {
         let name = format!("file{i}.txt");
         let content = format!("file{i} with content");
-        std::fs::write(folder.join(&name), &content).unwrap();
+        smol::block_on(async_fs::write(folder.join(&name), &content)).unwrap();
         files.push(name);
         contents.push(content);
     }
@@ -70,7 +73,7 @@ fn compress_multi_files_mix_solid_and_non_solid() {
     for i in 101..=200 {
         let name = format!("file{i}.txt");
         let content = format!("file{i} with content");
-        std::fs::write(folder.join(&name), &content).unwrap();
+        smol::block_on(async_fs::write(folder.join(&name), &content)).unwrap();
         files.push(name.clone());
         contents.push(content);
 
@@ -98,6 +101,9 @@ fn compress_multi_files_mix_solid_and_non_solid() {
         let content = &contents[i];
         let decompress_file = decompress_dest.join(name);
         assert!(decompress_file.exists());
-        assert_eq!(&std::fs::read_to_string(&decompress_file).unwrap(), content);
+        assert_eq!(
+            &smol::block_on(async_fs::read_to_string(&decompress_file)).unwrap(),
+            content
+        );
     }
 }

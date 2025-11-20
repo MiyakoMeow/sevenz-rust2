@@ -1,8 +1,8 @@
 #[cfg(feature = "util")]
-use std::{
-    fs::{read, read_to_string},
-    path::PathBuf,
-};
+#[cfg(feature = "util")]
+use futures_lite::StreamExt;
+#[cfg(feature = "util")]
+use std::path::PathBuf;
 
 #[cfg(feature = "util")]
 use sevenz_rust2::decompress_file;
@@ -23,7 +23,10 @@ fn decompress_single_empty_file_unencoded_header() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        ""
+    );
 }
 
 #[cfg(feature = "util")]
@@ -40,8 +43,14 @@ fn decompress_two_empty_files_unencoded_header() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "");
-    assert_eq!(read_to_string(file2_path).unwrap(), "");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        ""
+    );
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file2_path)).unwrap(),
+        ""
+    );
 }
 
 #[cfg(feature = "util")]
@@ -56,7 +65,10 @@ fn decompress_lzma_single_file_unencoded_header() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "this is a file\n");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        "this is a file\n"
+    );
 }
 
 #[cfg(feature = "util")]
@@ -75,8 +87,8 @@ fn decompress_lzma2_bcj_x86_file() {
     expected_file.push("tests/resources/decompress_x86.exe");
 
     assert_eq!(
-        read(file1_path).unwrap(),
-        read(expected_file).unwrap(),
+        smol::block_on(async_fs::read(file1_path)).unwrap(),
+        smol::block_on(async_fs::read(expected_file)).unwrap(),
         "decompressed files do not match!"
     );
 }
@@ -97,8 +109,8 @@ fn decompress_bcj_arm64_file() {
     expected_file.push("tests/resources/decompress_arm64.exe");
 
     assert_eq!(
-        read(file1_path).unwrap(),
-        read(expected_file).unwrap(),
+        smol::block_on(async_fs::read(file1_path)).unwrap(),
+        smol::block_on(async_fs::read(expected_file)).unwrap(),
         "decompressed files do not match!"
     );
 }
@@ -117,8 +129,14 @@ fn decompress_lzma_multiple_files_encoded_header() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "file one content\n");
-    assert_eq!(read_to_string(file2_path).unwrap(), "file two content\n");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        "file one content\n"
+    );
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file2_path)).unwrap(),
+        "file two content\n"
+    );
 }
 
 #[cfg(feature = "util")]
@@ -133,7 +151,10 @@ fn decompress_delta_lzma_single_file_unencoded_header() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "aaaabbbbcccc");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        "aaaabbbbcccc"
+    );
 }
 
 #[cfg(feature = "util")]
@@ -148,7 +169,10 @@ fn decompress_copy_lzma2_single_file() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(file1_path).unwrap(), "simple copy encoding");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(file1_path)).unwrap(),
+        "simple copy encoding"
+    );
 }
 
 #[cfg(all(feature = "util", feature = "ppmd"))]
@@ -163,9 +187,9 @@ fn decompress_ppmd_single_file() {
     file1_path.push("apache2.txt");
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
-    let decompressed_content = read_to_string(file1_path).unwrap();
+    let decompressed_content = smol::block_on(async_fs::read_to_string(file1_path)).unwrap();
 
-    let expected = read_to_string("tests/resources/apache2.txt").unwrap();
+    let expected = smol::block_on(async_fs::read_to_string("tests/resources/apache2.txt")).unwrap();
 
     assert_eq!(decompressed_content, expected);
 }
@@ -186,8 +210,14 @@ fn decompress_bzip2_file() {
 
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
-    assert_eq!(read_to_string(hello_path).unwrap(), "world\n");
-    assert_eq!(read_to_string(foo_path).unwrap(), "bar\n");
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(hello_path)).unwrap(),
+        "world\n"
+    );
+    assert_eq!(
+        smol::block_on(async_fs::read_to_string(foo_path)).unwrap(),
+        "bar\n"
+    );
 }
 
 /// zstdmt (which 7zip ZS uses), does encapsulate brotli data in a special frames,
@@ -207,7 +237,7 @@ fn decompress_zstdmt_brotli_file() {
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
     assert!(
-        read_to_string(license_path)
+        smol::block_on(async_fs::read_to_string(license_path))
             .unwrap()
             .contains("Apache License")
     );
@@ -228,7 +258,7 @@ fn decompress_zstdmt_lz4_file() {
     smol::block_on(decompress_file(source_file, target)).unwrap();
 
     assert!(
-        read_to_string(license_path)
+        smol::block_on(async_fs::read_to_string(license_path))
             .unwrap()
             .contains("Apache License")
     );
@@ -262,28 +292,31 @@ fn test_bcj2() {
 
 #[test]
 fn test_entry_compressed_size() {
-    let dir = std::fs::read_dir("tests/resources").unwrap();
-    for entry in dir {
-        let path = entry.unwrap().path();
-        if path.to_string_lossy().ends_with("7z") {
-            println!("{path:?}");
-            let archive =
-                smol::block_on(Archive::open_with_password(&path, &Password::empty())).unwrap();
-            for i in 0..archive.blocks.len() {
-                let fi = archive.stream_map.block_first_file_index[i];
-                let file = &archive.files[fi];
-                println!(
-                    "\t:{}\tsize={}, \tcompressed={}",
-                    file.name(),
-                    file.size,
-                    file.compressed_size
-                );
-                if file.has_stream && file.size > 0 {
-                    assert!(file.compressed_size > 0);
+    smol::block_on(async {
+        let mut dir = async_fs::read_dir("tests/resources").await.unwrap();
+        while let Some(res) = dir.next().await {
+            let path = res.unwrap().path();
+            if path.to_string_lossy().ends_with("7z") {
+                println!("{path:?}");
+                let archive = Archive::open_with_password(&path, &Password::empty())
+                    .await
+                    .unwrap();
+                for i in 0..archive.blocks.len() {
+                    let fi = archive.stream_map.block_first_file_index[i];
+                    let file = &archive.files[fi];
+                    println!(
+                        "\t:{}\tsize={}, \tcompressed={}",
+                        file.name(),
+                        file.size,
+                        file.compressed_size
+                    );
+                    if file.has_stream && file.size > 0 {
+                        assert!(file.compressed_size > 0);
+                    }
                 }
             }
         }
-    }
+    });
 }
 
 #[test]

@@ -27,8 +27,6 @@ impl<W> CountingWriter<W> {
     }
 }
 
-/* removed sync Write impl to avoid overlap */
-
 impl<W: AsyncWrite + Unpin> Write for CountingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         let len = async_io::block_on(AsyncWriteExt::write(&mut self.inner, buf))?;

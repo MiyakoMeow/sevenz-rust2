@@ -1,7 +1,5 @@
-use std::io::{Read, Seek, SeekFrom, Write};
-
 use async_io::block_on;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, SeekFrom};
 
 use js_sys::*;
 use wasm_bindgen::prelude::*;
@@ -94,78 +92,9 @@ struct Uint8ArrayStream {
     pos: usize,
 }
 
-impl Seek for Uint8ArrayStream {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        match pos {
-            SeekFrom::Start(n) => {
-                self.pos = n as usize;
-            }
-            SeekFrom::End(i) => {
-                let posi = self.data.length() as i64 + i;
-                if posi < 0 {
-                    self.pos = 0;
-                } else if posi >= self.data.length() as i64 {
-                    self.pos = self.data.length() as usize;
-                } else {
-                    self.pos = posi as usize;
-                }
-            }
-            SeekFrom::Current(i) => {
-                if i != 0 {
-                    let posi = self.pos as i64 + i;
-                    if posi < 0 {
-                        self.pos = 0;
-                    } else if posi >= self.data.length() as i64 {
-                        self.pos = self.data.length() as usize;
-                    } else {
-                        self.pos = posi as usize;
-                    }
-                }
-            }
-        }
-        Ok(self.pos as u64)
-    }
-}
-
 impl Uint8ArrayStream {
     fn new(data: Uint8Array) -> Self {
         Self { data, pos: 0 }
-    }
-}
-
-impl Read for Uint8ArrayStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let end = (self.pos + buf.len()).min(self.data.length() as usize);
-        let len = end - self.pos;
-        if len == 0 {
-            return Ok(0);
-        }
-        self.data
-            .slice(self.pos as u32, end as u32)
-            .copy_to(&mut buf[..len]);
-        self.pos = end;
-        Ok(len)
-    }
-}
-
-impl Write for Uint8ArrayStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let end = self.pos + buf.len();
-        let cur_len = self.data.length() as usize;
-        if end > cur_len {
-            let new_len = end.max(cur_len * 2).max(1);
-            let mut new_data = Uint8Array::new_with_length(new_len as u32);
-            new_data.set(&self.data, 0);
-            self.data = new_data;
-        }
-        let target = self.data.subarray(self.pos as u32, end as u32);
-        target.copy_from(buf);
-        self.pos = end;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
