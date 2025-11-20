@@ -399,7 +399,6 @@ pub(crate) fn add_encoder<W: AsyncWrite + Unpin>(
             let brotli_encoder = BrotliEncoder::new(
                 input,
                 options.quality,
-                options.window,
                 options.skippable_frame_size as usize,
             )?;
 

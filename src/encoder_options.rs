@@ -121,23 +121,19 @@ const DEFAULT_SKIPPABLE_FRAME_SIZE: u32 = 128 * 1024;
 /// Options for Brotli compression.
 pub struct BrotliOptions {
     pub(crate) quality: u32,
-    pub(crate) window: u32,
     pub(crate) skippable_frame_size: u32,
 }
 
 #[cfg(feature = "brotli")]
 impl BrotliOptions {
-    /// Creates Brotli options with the specified quality and window size.
+    /// Creates Brotli options with the specified quality.
     ///
     /// # Arguments
     /// * `quality` - Compression quality (0-11, clamped to this range)
-    /// * `window` - Window size (10-24, clamped to this range)
-    pub const fn from_quality_window(quality: u32, window: u32) -> Self {
+    pub const fn from_quality(quality: u32) -> Self {
         let quality = if quality > 11 { 11 } else { quality };
-        let window = if window > 24 { 24 } else { window };
         Self {
             quality,
-            window,
             skippable_frame_size: DEFAULT_SKIPPABLE_FRAME_SIZE,
         }
     }
@@ -166,7 +162,6 @@ impl Default for BrotliOptions {
     fn default() -> Self {
         Self {
             quality: 11,
-            window: 22,
             skippable_frame_size: DEFAULT_SKIPPABLE_FRAME_SIZE,
         }
     }

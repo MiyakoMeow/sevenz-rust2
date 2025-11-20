@@ -8,10 +8,10 @@ use crate::Error;
 use async_compression::futures::bufread::BrotliDecoder as AsyncBrotliDecoder;
 #[cfg(feature = "compress")]
 use async_compression::futures::write::BrotliEncoder as AsyncBrotliEncoder;
-use futures::io::AsyncReadExt as _;
-use futures::io::BufReader as AsyncBufReader;
+use futures::io::AsyncRead;
 #[cfg(feature = "compress")]
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use futures::io::AsyncWrite;
+use futures::io::BufReader as AsyncBufReader;
 
 /// Magic bytes of a skippable frame format as used in brotli by zstdmt.
 const SKIPPABLE_FRAME_MAGIC: u32 = 0x184D2A50;
@@ -30,11 +30,12 @@ pub(crate) struct BrotliDecoder<R: AsyncRead + Unpin> {
 impl<R: AsyncRead + Unpin> BrotliDecoder<R> {
     pub(crate) fn new(mut input: R, buffer_size: usize) -> Result<Self, Error> {
         let mut header = [0u8; 16];
-        let header_read = match async_io::block_on(AsyncReadExt::read(&mut input, &mut header)) {
-            Ok(n) if n >= 4 => n,
-            Ok(_) => return Err(Error::other("Input too short")),
-            Err(e) => return Err(e.into()),
-        };
+        let header_read =
+            match async_io::block_on(futures::io::AsyncReadExt::read(&mut input, &mut header)) {
+                Ok(n) if n >= 4 => n,
+                Ok(_) => return Err(Error::other("Input too short")),
+                Err(e) => return Err(e.into()),
+            };
 
         let magic_value = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
 
@@ -57,7 +58,7 @@ impl<R: AsyncRead + Unpin> BrotliDecoder<R> {
             InnerReader::new_standard(input, header[..header_read].to_vec())
         };
 
-        let bufread = AsyncBufReader::new(inner_reader);
+        let bufread = AsyncBufReader::with_capacity(buffer_size, inner_reader);
         let decompressor = AsyncBrotliDecoder::new(bufread);
 
         Ok(BrotliDecoder {
@@ -84,7 +85,8 @@ impl<R: AsyncRead + Unpin> futures::io::AsyncRead for BrotliDecoder<R> {
                     };
                     if inner_reader.read_next_frame_header()? {
                         let reader = std::mem::replace(inner_reader, InnerReader::empty());
-                        let bufread: AsyncBufReader<InnerReader<R>> = AsyncBufReader::new(reader);
+                        let bufread: AsyncBufReader<InnerReader<R>> =
+                            AsyncBufReader::with_capacity(self.buffer_size, reader);
                         let mut decompressor = AsyncBrotliDecoder::new(bufread);
                         let poll = std::pin::Pin::new(&mut decompressor).poll_read(cx, buf);
                         self.inner = Some(decompressor);
@@ -150,30 +152,38 @@ impl<R: AsyncRead + Unpin> InnerReader<R> {
                     return Ok(false);
                 }
                 let mut buf4 = [0u8; 4];
-                match async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf4)) {
+                match async_io::block_on(futures::io::AsyncReadExt::read_exact(reader, &mut buf4)) {
                     Ok(_) => {
                         let magic = u32::from_le_bytes(buf4);
                         if magic != SKIPPABLE_FRAME_MAGIC {
                             return Ok(false);
                         }
 
-                        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf4))?;
+                        async_io::block_on(futures::io::AsyncReadExt::read_exact(
+                            reader, &mut buf4,
+                        ))?;
                         let skippable_size = u32::from_le_bytes(buf4);
                         if skippable_size != 8 {
                             return Ok(false);
                         }
 
-                        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf4))?;
+                        async_io::block_on(futures::io::AsyncReadExt::read_exact(
+                            reader, &mut buf4,
+                        ))?;
                         let compressed_size = u32::from_le_bytes(buf4);
 
                         let mut buf2 = [0u8; 2];
-                        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf2))?;
+                        async_io::block_on(futures::io::AsyncReadExt::read_exact(
+                            reader, &mut buf2,
+                        ))?;
                         let brotli_magic = u16::from_le_bytes(buf2);
                         if brotli_magic != BROTLI_MAGIC {
                             return Ok(false);
                         }
 
-                        async_io::block_on(AsyncReadExt::read_exact(reader, &mut buf2))?;
+                        async_io::block_on(futures::io::AsyncReadExt::read_exact(
+                            reader, &mut buf2,
+                        ))?;
                         let _uncompressed_hint = u16::from_le_bytes(buf2);
 
                         *remaining_in_frame = compressed_size;
@@ -249,8 +259,6 @@ impl<R: AsyncRead + Unpin> futures::io::AsyncRead for InnerReader<R> {
 pub(crate) struct BrotliEncoder<W: AsyncWrite + Unpin> {
     inner: InnerWriter<W>,
     quality: u32,
-    window: u32,
-    buffer_size: usize,
 }
 
 #[cfg(feature = "compress")]
@@ -268,14 +276,7 @@ enum InnerWriter<W: AsyncWrite + Unpin> {
 
 #[cfg(feature = "compress")]
 impl<W: AsyncWrite + Unpin> BrotliEncoder<W> {
-    pub(crate) fn new(
-        writer: W,
-        quality: u32,
-        window: u32,
-        frame_size: usize,
-    ) -> Result<Self, Error> {
-        let buffer_size = 8192;
-
+    pub(crate) fn new(writer: W, quality: u32, frame_size: usize) -> Result<Self, Error> {
         let inner = if frame_size == 0 {
             let compressor = AsyncBrotliEncoder::with_quality(
                 writer,
@@ -298,12 +299,7 @@ impl<W: AsyncWrite + Unpin> BrotliEncoder<W> {
             }
         };
 
-        Ok(Self {
-            inner,
-            quality,
-            window,
-            buffer_size,
-        })
+        Ok(Self { inner, quality })
     }
 
     #[cfg(feature = "compress")]
