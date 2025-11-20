@@ -2,8 +2,6 @@ use std::{
     cell::RefCell, collections::HashMap, future::Future, io, num::NonZeroUsize, pin::Pin, rc::Rc,
 };
 
-use std::io::{Read, Seek};
-
 use futures::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, SeekFrom};
 
 use async_fs as afs;
@@ -11,7 +9,7 @@ use crc32fast::Hasher;
 use lzma_rust2::filter::bcj2::Bcj2Reader;
 
 use crate::{
-    ByteReader, Password,
+    Password,
     archive::*,
     bitset::BitSet,
     block::*,
@@ -130,25 +128,7 @@ impl<R> Crc32VerifyingReader<R> {
     }
 }
 
-impl<R: Read> Read for Crc32VerifyingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.remaining <= 0 {
-            return Ok(0);
-        }
-        let size = self.inner.read(buf)?;
-        if size > 0 {
-            self.remaining -= size as i64;
-            self.crc_digest.update(&buf[..size]);
-        }
-        if self.remaining <= 0 {
-            let d = std::mem::replace(&mut self.crc_digest, Hasher::new()).finalize();
-            if d as u64 != self.expected_value {
-                return Err(std::io::Error::other(Error::ChecksumVerificationFailed));
-            }
-        }
-        Ok(size)
-    }
-}
+// synchronous Read impl removed to prefer async pipeline
 
 impl<R: futures::io::AsyncRead + Unpin> futures::io::AsyncRead for Crc32VerifyingReader<R> {
     fn poll_read(
@@ -280,11 +260,9 @@ impl Archive {
         if crc32 != start_header_crc {
             return Err(Error::ChecksumVerificationFailed);
         }
-        let mut buf_read = buf.as_slice();
-        let offset = buf_read.read_u64()?;
-
-        let size = buf_read.read_u64()?;
-        let crc = buf_read.read_u32()?;
+        let offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let size = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let crc = u32::from_le_bytes(buf[16..20].try_into().unwrap());
         Ok(StartHeader {
             next_header_offset: offset,
             next_header_size: size,
@@ -292,23 +270,42 @@ impl Archive {
         })
     }
 
-    fn read_header<R: Read + Seek>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
-        let mut nid = header.read_u8()?;
+    async fn read_header<R: AsyncRead + AsyncSeek + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid == K_ARCHIVE_PROPERTIES {
-            Self::read_archive_properties(header)?;
-            nid = header.read_u8()?;
+            Self::read_archive_properties(header).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         if nid == K_ADDITIONAL_STREAMS_INFO {
             return Err(Error::other("Additional streams unsupported"));
         }
         if nid == K_MAIN_STREAMS_INFO {
-            Self::read_streams_info(header, archive)?;
-            nid = header.read_u8()?;
+            Self::read_streams_info(header, archive).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
         if nid == K_FILES_INFO {
-            Self::read_files_info(header, archive)?;
-            nid = header.read_u8()?;
+            Self::read_files_info(header, archive).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
         if nid != K_END {
             return Err(Error::BadTerminatedHeader(nid));
@@ -317,12 +314,22 @@ impl Archive {
         Ok(())
     }
 
-    fn read_archive_properties<R: Read + Seek>(header: &mut R) -> Result<(), Error> {
-        let mut nid = header.read_u8()?;
+    async fn read_archive_properties<R: AsyncRead + AsyncSeek + Unpin>(
+        header: &mut R,
+    ) -> Result<(), Error> {
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         while nid != K_END {
-            let property_size = read_variable_usize(header, "propertySize")?;
-            header.seek(SeekFrom::Current(property_size as i64))?;
-            nid = header.read_u8()?;
+            let property_size = read_variable_usize(header, "propertySize").await?;
+            AsyncSeekExt::seek(header, SeekFrom::Current(property_size as i64)).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
         Ok(())
     }
@@ -400,11 +407,11 @@ impl Archive {
         }
 
         let mut archive = Archive::default();
-        let mut buf_reader = buf.as_slice();
-        let mut nid = buf_reader.read_u8()?;
-        let mut header = if nid == K_ENCODED_HEADER {
+        let nid = buf.first().copied().unwrap_or(0);
+        if nid == K_ENCODED_HEADER {
+            let mut cursor = futures::io::Cursor::new(&buf[1..]);
             let (mut out_reader, buf_size) = Self::read_encoded_header(
-                &mut buf_reader,
+                &mut cursor,
                 reader,
                 &mut archive,
                 password,
@@ -417,15 +424,11 @@ impl Archive {
                 .await
                 .map_err(|e| Error::bad_password(e, !password.is_empty()))?;
             archive = Archive::default();
-            buf_reader = buf.as_slice();
-            nid = buf_reader.read_u8()?;
-            buf_reader
-        } else {
-            buf_reader
-        };
-        let mut header = std::io::Cursor::new(&mut header);
+        }
+        let nid = buf.first().copied().unwrap_or(0);
         if nid == K_HEADER {
-            Self::read_header(&mut header, &mut archive)?;
+            let mut header = futures::io::Cursor::new(&buf[1..]);
+            Self::read_header(&mut header, &mut archive).await?;
         } else {
             return Err(Error::other("Broken or unsupported archive: no Header"));
         }
@@ -439,13 +442,13 @@ impl Archive {
     }
 
     async fn read_encoded_header<'r, RI: 'r + AsyncRead + AsyncSeek + Unpin>(
-        header: &mut impl Read,
+        header: &mut (impl AsyncRead + Unpin),
         reader: &'r mut RI,
         archive: &mut Archive,
         password: &Password,
         thread_count: u32,
     ) -> Result<(Box<dyn futures::io::AsyncRead + Unpin + 'r>, usize), Error> {
-        Self::read_streams_info(header, archive)?;
+        Self::read_streams_info(header, archive).await?;
         let block = archive
             .blocks
             .first()
@@ -490,22 +493,41 @@ impl Archive {
         Ok((decoder, unpack_size))
     }
 
-    fn read_streams_info<R: Read>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
-        let mut nid = header.read_u8()?;
+    async fn read_streams_info<R: AsyncRead + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid == K_PACK_INFO {
-            Self::read_pack_info(header, archive)?;
-            nid = header.read_u8()?;
+            Self::read_pack_info(header, archive).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         if nid == K_UNPACK_INFO {
-            Self::read_unpack_info(header, archive)?;
-            nid = header.read_u8()?;
+            Self::read_unpack_info(header, archive).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         } else {
             archive.blocks.clear();
         }
         if nid == K_SUB_STREAMS_INFO {
-            Self::read_sub_streams_info(header, archive)?;
-            nid = header.read_u8()?;
+            Self::read_sub_streams_info(header, archive).await?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
         if nid != K_END {
             return Err(Error::BadTerminatedStreamsInfo(nid));
@@ -514,22 +536,29 @@ impl Archive {
         Ok(())
     }
 
-    fn read_files_info<R: Read + Seek>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
-        let num_files = read_variable_usize(header, "num files")?;
+    async fn read_files_info<R: AsyncRead + AsyncSeek + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        let num_files = read_variable_usize(header, "num files").await?;
         let mut files: Vec<ArchiveEntry> = vec![Default::default(); num_files];
 
         let mut is_empty_stream: Option<BitSet> = None;
         let mut is_empty_file: Option<BitSet> = None;
         let mut is_anti: Option<BitSet> = None;
         loop {
-            let prop_type = header.read_u8()?;
+            let prop_type = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
             if prop_type == 0 {
                 break;
             }
-            let size = read_variable_u64(header)?;
+            let size = read_variable_u64(header).await?;
             match prop_type {
                 K_EMPTY_STREAM => {
-                    is_empty_stream = Some(read_bits(header, num_files)?);
+                    is_empty_stream = Some(read_bits(header, num_files).await?);
                 }
                 K_EMPTY_FILE => {
                     let n = if let Some(s) = &is_empty_stream {
@@ -539,7 +568,7 @@ impl Archive {
                             "Header format error: kEmptyStream must appear before kEmptyFile",
                         ));
                     };
-                    is_empty_file = Some(read_bits(header, n)?);
+                    is_empty_file = Some(read_bits(header, n).await?);
                 }
                 K_ANTI => {
                     let n = if let Some(s) = is_empty_stream.as_ref() {
@@ -549,10 +578,14 @@ impl Archive {
                             "Header format error: kEmptyStream must appear before kEmptyFile",
                         ));
                     };
-                    is_anti = Some(read_bits(header, n)?);
+                    is_anti = Some(read_bits(header, n).await?);
                 }
                 K_NAME => {
-                    let external = header.read_u8()?;
+                    let external = {
+                        let mut b = [0u8; 1];
+                        AsyncReadExt::read_exact(header, &mut b).await?;
+                        b[0]
+                    };
                     if external != 0 {
                         return Err(Error::other("Not implemented:external != 0"));
                     }
@@ -561,23 +594,35 @@ impl Archive {
                     }
 
                     let size = assert_usize(size, "file names length")?;
-                    // let mut names = vec![0u8; size - 1];
-                    // header.read_exact(&mut names)?;
-                    let names_reader = NamesReader::new(header, size - 1);
-
                     let mut next_file = 0;
-                    for s in names_reader {
-                        files[next_file].name = s?;
-                        next_file += 1;
+                    let mut read_bytes = 0usize;
+                    let mut cache: Vec<u16> = Vec::with_capacity(16);
+                    let mut buf2 = [0u8; 2];
+                    while read_bytes < size - 1 {
+                        AsyncReadExt::read_exact(header, &mut buf2).await?;
+                        read_bytes += 2;
+                        let u = u16::from_le_bytes(buf2);
+                        if u == 0 {
+                            let s = String::from_utf16(&cache)
+                                .map_err(|e| Error::other(e.to_string()))?;
+                            files[next_file].name = s;
+                            next_file += 1;
+                            cache.clear();
+                        } else {
+                            cache.push(u);
+                        }
                     }
-
                     if next_file != files.len() {
                         return Err(Error::other("Error parsing file names"));
                     }
                 }
                 K_C_TIME => {
-                    let times_defined = read_all_or_bits(header, num_files)?;
-                    let external = header.read_u8()?;
+                    let times_defined = read_all_or_bits(header, num_files).await?;
+                    let external = {
+                        let mut b = [0u8; 1];
+                        AsyncReadExt::read_exact(header, &mut b).await?;
+                        b[0]
+                    };
                     if external != 0 {
                         return Err(Error::other(format!(
                             "kCTime Unimplemented:external={external}"
@@ -586,13 +631,19 @@ impl Archive {
                     for (i, file) in files.iter_mut().enumerate() {
                         file.has_creation_date = times_defined.contains(i);
                         if file.has_creation_date {
-                            file.creation_date = header.read_u64()?.into();
+                            let mut b8 = [0u8; 8];
+                            AsyncReadExt::read_exact(header, &mut b8).await?;
+                            file.creation_date = u64::from_le_bytes(b8).into();
                         }
                     }
                 }
                 K_A_TIME => {
-                    let times_defined = read_all_or_bits(header, num_files)?;
-                    let external = header.read_u8()?;
+                    let times_defined = read_all_or_bits(header, num_files).await?;
+                    let external = {
+                        let mut b = [0u8; 1];
+                        AsyncReadExt::read_exact(header, &mut b).await?;
+                        b[0]
+                    };
                     if external != 0 {
                         return Err(Error::other(format!(
                             "kATime Unimplemented:external={external}"
@@ -601,13 +652,19 @@ impl Archive {
                     for (i, file) in files.iter_mut().enumerate() {
                         file.has_access_date = times_defined.contains(i);
                         if file.has_access_date {
-                            file.access_date = header.read_u64()?.into();
+                            let mut b8 = [0u8; 8];
+                            AsyncReadExt::read_exact(header, &mut b8).await?;
+                            file.access_date = u64::from_le_bytes(b8).into();
                         }
                     }
                 }
                 K_M_TIME => {
-                    let times_defined = read_all_or_bits(header, num_files)?;
-                    let external = header.read_u8()?;
+                    let times_defined = read_all_or_bits(header, num_files).await?;
+                    let external = {
+                        let mut b = [0u8; 1];
+                        AsyncReadExt::read_exact(header, &mut b).await?;
+                        b[0]
+                    };
                     if external != 0 {
                         return Err(Error::other(format!(
                             "kMTime Unimplemented:external={external}"
@@ -616,13 +673,19 @@ impl Archive {
                     for (i, file) in files.iter_mut().enumerate() {
                         file.has_last_modified_date = times_defined.contains(i);
                         if file.has_last_modified_date {
-                            file.last_modified_date = header.read_u64()?.into();
+                            let mut b8 = [0u8; 8];
+                            AsyncReadExt::read_exact(header, &mut b8).await?;
+                            file.last_modified_date = u64::from_le_bytes(b8).into();
                         }
                     }
                 }
                 K_WIN_ATTRIBUTES => {
-                    let times_defined = read_all_or_bits(header, num_files)?;
-                    let external = header.read_u8()?;
+                    let times_defined = read_all_or_bits(header, num_files).await?;
+                    let external = {
+                        let mut b = [0u8; 1];
+                        AsyncReadExt::read_exact(header, &mut b).await?;
+                        b[0]
+                    };
                     if external != 0 {
                         return Err(Error::other(format!(
                             "kWinAttributes Unimplemented:external={external}"
@@ -631,16 +694,18 @@ impl Archive {
                     for (i, file) in files.iter_mut().enumerate() {
                         file.has_windows_attributes = times_defined.contains(i);
                         if file.has_windows_attributes {
-                            file.windows_attributes = header.read_u32()?;
+                            let mut b4 = [0u8; 4];
+                            AsyncReadExt::read_exact(header, &mut b4).await?;
+                            file.windows_attributes = u32::from_le_bytes(b4);
                         }
                     }
                 }
                 K_START_POS => return Err(Error::other("kStartPos is unsupported, please report")),
                 K_DUMMY => {
-                    header.seek(SeekFrom::Current(size as i64))?;
+                    AsyncSeekExt::seek(header, SeekFrom::Current(size as i64)).await?;
                 }
                 _ => {
-                    header.seek(SeekFrom::Current(size as i64))?;
+                    AsyncSeekExt::seek(header, SeekFrom::Current(size as i64)).await?;
                 }
             };
         }
@@ -754,27 +819,44 @@ impl Archive {
         Ok(())
     }
 
-    fn read_pack_info<R: Read>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
-        archive.pack_pos = read_variable_u64(header)?;
-        let num_pack_streams = read_variable_usize(header, "num pack streams")?;
-        let mut nid = header.read_u8()?;
+    async fn read_pack_info<R: AsyncRead + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        archive.pack_pos = read_variable_u64(header).await?;
+        let num_pack_streams = read_variable_usize(header, "num pack streams").await?;
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid == K_SIZE {
             archive.pack_sizes = vec![0u64; num_pack_streams];
             for i in 0..archive.pack_sizes.len() {
-                archive.pack_sizes[i] = read_variable_u64(header)?;
+                archive.pack_sizes[i] = read_variable_u64(header).await?;
             }
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         if nid == K_CRC {
-            archive.pack_crcs_defined = read_all_or_bits(header, num_pack_streams)?;
+            archive.pack_crcs_defined = read_all_or_bits(header, num_pack_streams).await?;
             archive.pack_crcs = vec![0; num_pack_streams];
             for i in 0..num_pack_streams {
                 if archive.pack_crcs_defined.contains(i) {
-                    archive.pack_crcs[i] = header.read_u32()? as u64;
+                    let mut b4 = [0u8; 4];
+                    AsyncReadExt::read_exact(header, &mut b4).await?;
+                    archive.pack_crcs[i] = u32::from_le_bytes(b4) as u64;
                 }
             }
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         if nid != K_END {
@@ -783,24 +865,39 @@ impl Archive {
 
         Ok(())
     }
-    fn read_unpack_info<R: Read>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
-        let nid = header.read_u8()?;
+    async fn read_unpack_info<R: AsyncRead + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        let nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid != K_FOLDER {
             return Err(Error::other(format!("Expected kFolder, got {nid}")));
         }
-        let num_blocks = read_variable_usize(header, "num blocks")?;
+        let num_blocks = read_variable_usize(header, "num blocks").await?;
 
         archive.blocks.reserve_exact(num_blocks);
-        let external = header.read_u8()?;
+        let external = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if external != 0 {
             return Err(Error::ExternalUnsupported);
         }
 
         for _ in 0..num_blocks {
-            archive.blocks.push(Self::read_block(header)?);
+            archive.blocks.push(Self::read_block(header).await?);
         }
 
-        let nid = header.read_u8()?;
+        let nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid != K_CODERS_UNPACK_SIZE {
             return Err(Error::other(format!(
                 "Expected kCodersUnpackSize, got {nid}"
@@ -811,22 +908,32 @@ impl Archive {
             let tos = block.total_output_streams;
             block.unpack_sizes.reserve_exact(tos);
             for _ in 0..tos {
-                block.unpack_sizes.push(read_variable_u64(header)?);
+                block.unpack_sizes.push(read_variable_u64(header).await?);
             }
         }
 
-        let mut nid = header.read_u8()?;
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid == K_CRC {
-            let crcs_defined = read_all_or_bits(header, num_blocks)?;
+            let crcs_defined = read_all_or_bits(header, num_blocks).await?;
             for i in 0..num_blocks {
                 if crcs_defined.contains(i) {
                     archive.blocks[i].has_crc = true;
-                    archive.blocks[i].crc = header.read_u32()? as u64;
+                    let mut b4 = [0u8; 4];
+                    AsyncReadExt::read_exact(header, &mut b4).await?;
+                    archive.blocks[i].crc = u32::from_le_bytes(b4) as u64;
                 } else {
                     archive.blocks[i].has_crc = false;
                 }
             }
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
         if nid != K_END {
             return Err(Error::BadTerminatedUnpackInfo);
@@ -835,21 +942,32 @@ impl Archive {
         Ok(())
     }
 
-    fn read_sub_streams_info<R: Read>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
+    async fn read_sub_streams_info<R: AsyncRead + Unpin>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
         for block in archive.blocks.iter_mut() {
             block.num_unpack_sub_streams = 1;
         }
         let mut total_unpack_streams = archive.blocks.len();
 
-        let mut nid = header.read_u8()?;
+        let mut nid = {
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            b[0]
+        };
         if nid == K_NUM_UNPACK_STREAM {
             total_unpack_streams = 0;
             for block in archive.blocks.iter_mut() {
-                let num_streams = read_variable_usize(header, "numStreams")?;
+                let num_streams = read_variable_usize(header, "numStreams").await?;
                 block.num_unpack_sub_streams = num_streams;
                 total_unpack_streams += num_streams;
             }
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         let mut sub_streams_info = SubStreamsInfo::default();
@@ -869,7 +987,7 @@ impl Archive {
             let mut sum = 0;
             if nid == K_SIZE {
                 for _i in 0..block.num_unpack_sub_streams - 1 {
-                    let size = read_variable_u64(header)?;
+                    let size = read_variable_u64(header).await?;
                     sub_streams_info.unpack_sizes[next_unpack_stream] = size;
                     next_unpack_stream += 1;
                     sum += size;
@@ -885,7 +1003,11 @@ impl Archive {
             next_unpack_stream += 1;
         }
         if nid == K_SIZE {
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         let mut num_digests = 0;
@@ -896,11 +1018,13 @@ impl Archive {
         }
 
         if nid == K_CRC {
-            let has_missing_crc = read_all_or_bits(header, num_digests)?;
+            let has_missing_crc = read_all_or_bits(header, num_digests).await?;
             let mut missing_crcs = vec![0; num_digests];
             for (i, missing_crc) in missing_crcs.iter_mut().enumerate() {
                 if has_missing_crc.contains(i) {
-                    *missing_crc = header.read_u32()? as u64;
+                    let mut b4 = [0u8; 4];
+                    AsyncReadExt::read_exact(header, &mut b4).await?;
+                    *missing_crc = u32::from_le_bytes(b4) as u64;
                 }
             }
             let mut next_crc = 0;
@@ -924,7 +1048,11 @@ impl Archive {
                 }
             }
 
-            nid = header.read_u8()?;
+            nid = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
         }
 
         if nid != K_END {
@@ -935,16 +1063,20 @@ impl Archive {
         Ok(())
     }
 
-    fn read_block<R: Read>(header: &mut R) -> Result<Block, Error> {
+    async fn read_block<R: AsyncRead + Unpin>(header: &mut R) -> Result<Block, Error> {
         let mut block = Block::default();
 
-        let num_coders = read_variable_usize(header, "num coders")?;
+        let num_coders = read_variable_usize(header, "num coders").await?;
         let mut coders = Vec::with_capacity(num_coders);
         let mut total_in_streams = 0;
         let mut total_out_streams = 0;
         for _i in 0..num_coders {
             let mut coder = Coder::default();
-            let bits = header.read_u8()?;
+            let bits = {
+                let mut b = [0u8; 1];
+                AsyncReadExt::read_exact(header, &mut b).await?;
+                b[0]
+            };
             let id_size = bits & 0xF;
             let is_simple = (bits & 0x10) == 0;
             let has_attributes = (bits & 0x20) != 0;
@@ -952,20 +1084,20 @@ impl Archive {
 
             coder.id_size = id_size as usize;
 
-            header.read_exact(coder.decompression_method_id_mut())?;
+            AsyncReadExt::read_exact(header, coder.decompression_method_id_mut()).await?;
             if is_simple {
                 coder.num_in_streams = 1;
                 coder.num_out_streams = 1;
             } else {
-                coder.num_in_streams = read_variable_u64(header)?;
-                coder.num_out_streams = read_variable_u64(header)?;
+                coder.num_in_streams = read_variable_u64(header).await?;
+                coder.num_out_streams = read_variable_u64(header).await?;
             }
             total_in_streams += coder.num_in_streams;
             total_out_streams += coder.num_out_streams;
             if has_attributes {
-                let properties_size = read_variable_usize(header, "properties size")?;
+                let properties_size = read_variable_usize(header, "properties size").await?;
                 let mut props = vec![0u8; properties_size];
-                header.read_exact(&mut props)?;
+                AsyncReadExt::read_exact(header, &mut props).await?;
                 coder.properties = props;
             }
             coders.push(coder);
@@ -989,8 +1121,8 @@ impl Archive {
         let mut bind_pairs = Vec::with_capacity(num_bind_pairs);
         for _ in 0..num_bind_pairs {
             let bp = BindPair {
-                in_index: read_variable_u64(header)?,
-                out_index: read_variable_u64(header)?,
+                in_index: read_variable_u64(header).await?,
+                out_index: read_variable_u64(header).await?,
             };
             bind_pairs.push(bp);
         }
@@ -1017,7 +1149,7 @@ impl Archive {
             packed_streams[0] = index;
         } else {
             for packed_stream in packed_streams.iter_mut() {
-                *packed_stream = read_variable_u64(header)?;
+                *packed_stream = read_variable_u64(header).await?;
             }
         }
         block.packed_streams = packed_streams;
@@ -1027,8 +1159,11 @@ impl Archive {
 }
 
 #[inline]
-fn read_variable_usize<R: Read>(reader: &mut R, field: &str) -> Result<usize, Error> {
-    let size = read_variable_u64(reader)?;
+async fn read_variable_usize<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    field: &str,
+) -> Result<usize, Error> {
+    let size = read_variable_u64(reader).await?;
     assert_usize(size, field)
 }
 
@@ -1040,23 +1175,35 @@ fn assert_usize(size: u64, field: &str) -> Result<usize, Error> {
     Ok(size as usize)
 }
 
-fn read_variable_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
-    let first = reader.read_u8()? as u64;
+async fn read_variable_u64<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<u64> {
+    let first = {
+        let mut b = [0u8; 1];
+        AsyncReadExt::read_exact(reader, &mut b).await?;
+        b[0] as u64
+    };
     let mut mask = 0x80_u64;
     let mut value = 0;
     for i in 0..8 {
         if (first & mask) == 0 {
             return Ok(value | ((first & (mask - 1)) << (8 * i)));
         }
-        let b = reader.read_u8()? as u64;
+        let b = {
+            let mut bb = [0u8; 1];
+            AsyncReadExt::read_exact(reader, &mut bb).await?;
+            bb[0] as u64
+        };
         value |= b << (8 * i);
         mask >>= 1;
     }
     Ok(value)
 }
 
-fn read_all_or_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> {
-    let all = header.read_u8()?;
+async fn read_all_or_bits<R: AsyncRead + Unpin>(header: &mut R, size: usize) -> io::Result<BitSet> {
+    let all = {
+        let mut b = [0u8; 1];
+        AsyncReadExt::read_exact(header, &mut b).await?;
+        b[0]
+    };
     if all != 0 {
         let mut bits = BitSet::with_capacity(size);
         for i in 0..size {
@@ -1064,18 +1211,20 @@ fn read_all_or_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> 
         }
         Ok(bits)
     } else {
-        read_bits(header, size)
+        read_bits(header, size).await
     }
 }
 
-fn read_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> {
+async fn read_bits<R: AsyncRead + Unpin>(header: &mut R, size: usize) -> io::Result<BitSet> {
     let mut bits = BitSet::with_capacity(size);
     let mut mask = 0u32;
     let mut cache = 0u32;
     for i in 0..size {
         if mask == 0 {
             mask = 0x80;
-            cache = header.read_u8()? as u32;
+            let mut b = [0u8; 1];
+            AsyncReadExt::read_exact(header, &mut b).await?;
+            cache = b[0] as u32;
         }
         if (cache & mask) != 0 {
             bits.insert(i);
@@ -1083,50 +1232,6 @@ fn read_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> {
         mask >>= 1;
     }
     Ok(bits)
-}
-
-struct NamesReader<'a, R: Read> {
-    max_bytes: usize,
-    read_bytes: usize,
-    cache: Vec<u16>,
-    reader: &'a mut R,
-}
-
-impl<'a, R: Read> NamesReader<'a, R> {
-    fn new(reader: &'a mut R, max_bytes: usize) -> Self {
-        Self {
-            max_bytes,
-            reader,
-            read_bytes: 0,
-            cache: Vec::with_capacity(16),
-        }
-    }
-}
-
-impl<R: Read> Iterator for NamesReader<'_, R> {
-    type Item = Result<String, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.max_bytes <= self.read_bytes {
-            return None;
-        }
-        self.cache.clear();
-        let mut buf = [0; 2];
-        while self.read_bytes < self.max_bytes {
-            let r = self.reader.read_exact(&mut buf);
-            self.read_bytes += 2;
-            if let Err(e) = r {
-                return Some(Err(e.into()));
-            }
-            let u = u16::from_le_bytes(buf);
-            if u == 0 {
-                break;
-            }
-            self.cache.push(u);
-        }
-
-        Some(String::from_utf16(&self.cache).map_err(|e| Error::other(e.to_string())))
-    }
 }
 
 #[derive(Copy, Clone)]
