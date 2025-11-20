@@ -2,7 +2,7 @@ use std::io::Write;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::io::AsyncRead;
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 #[cfg(feature = "compress")]
 use aes::cipher::BlockEncryptMut;
@@ -214,6 +214,8 @@ pub(crate) struct Aes256Sha256Encoder<W> {
     output: W,
     enc: Aes256CbcEnc,
     buffer: Vec<u8>,
+    out_buf: Vec<u8>,
+    out_pos: usize,
     finished: bool,
     write_size: u32,
 }
@@ -230,6 +232,8 @@ impl<W> Aes256Sha256Encoder<W> {
             output,
             enc: Aes256CbcEnc::new(&GenericArray::from(key), &iv.into()),
             buffer: Default::default(),
+            out_buf: Default::default(),
+            out_pos: 0,
             finished: false,
             write_size: 0,
         })
@@ -300,6 +304,198 @@ impl<W: Write> Write for Aes256Sha256Encoder<W> {
             self.buffer.clear();
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "compress")]
+impl<W: AsyncWrite + Unpin> AsyncWrite for Aes256Sha256Encoder<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.out_pos < self.out_buf.len() {
+            let buf = std::mem::take(&mut self.out_buf);
+            let mut pos = self.out_pos;
+            let slice = &buf[pos..];
+            match Pin::new(&mut self.output).poll_write(cx, slice) {
+                Poll::Pending => {
+                    self.out_buf = buf;
+                    self.out_pos = pos;
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(w)) => {
+                    pos += w;
+                    self.write_size += w as u32;
+                    if pos < buf.len() {
+                        self.out_buf = buf;
+                        self.out_pos = pos;
+                        return Poll::Pending;
+                    }
+                    self.out_pos = 0;
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            }
+        }
+        if self.finished && !buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if buf.is_empty() {
+            self.finished = true;
+            if !self.buffer.is_empty() {
+                let mut block = [0u8; 16];
+                block[..self.buffer.len()].copy_from_slice(&self.buffer);
+                {
+                    let b = GenericArray::from_mut_slice(&mut block);
+                    self.enc.encrypt_block_mut(b);
+                }
+                self.buffer.clear();
+                self.out_buf.extend_from_slice(&block);
+            }
+            if self.out_pos < self.out_buf.len() {
+                let buf2 = std::mem::take(&mut self.out_buf);
+                let mut pos2 = self.out_pos;
+                let slice = &buf2[pos2..];
+                match Pin::new(&mut self.output).poll_write(cx, slice) {
+                    Poll::Pending => {
+                        self.out_buf = buf2;
+                        self.out_pos = pos2;
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(w)) => {
+                        pos2 += w;
+                        self.write_size += w as u32;
+                        if pos2 < buf2.len() {
+                            self.out_buf = buf2;
+                            self.out_pos = pos2;
+                            return Poll::Pending;
+                        }
+                        self.out_pos = 0;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                }
+            }
+            return Poll::Ready(Ok(0));
+        }
+        let len = buf.len();
+        let mut out = Vec::new();
+        if !self.buffer.is_empty() {
+            let blen = self.buffer.len();
+            let need = 16 - blen;
+            if buf.len() >= need {
+                let mut block = [0u8; 16];
+                block[..blen].copy_from_slice(&self.buffer);
+                block[blen..].copy_from_slice(&buf[..need]);
+                {
+                    let b = GenericArray::from_mut_slice(&mut block);
+                    self.enc.encrypt_block_mut(b);
+                }
+                out.extend_from_slice(&block);
+                self.buffer.clear();
+                for chunk in buf[need..].chunks(16) {
+                    if chunk.len() < 16 {
+                        self.buffer.extend_from_slice(chunk);
+                        break;
+                    }
+                    let mut block = [0u8; 16];
+                    block.copy_from_slice(chunk);
+                    {
+                        let b = GenericArray::from_mut_slice(&mut block);
+                        self.enc.encrypt_block_mut(b);
+                    }
+                    out.extend_from_slice(&block);
+                }
+            } else {
+                self.buffer.extend_from_slice(buf);
+                return Poll::Ready(Ok(len));
+            }
+        } else {
+            for chunk in buf.chunks(16) {
+                if chunk.len() < 16 {
+                    self.buffer.extend_from_slice(chunk);
+                    break;
+                }
+                let mut block = [0u8; 16];
+                block.copy_from_slice(chunk);
+                {
+                    let b = GenericArray::from_mut_slice(&mut block);
+                    self.enc.encrypt_block_mut(b);
+                }
+                out.extend_from_slice(&block);
+            }
+        }
+        if out.is_empty() {
+            return Poll::Ready(Ok(len));
+        }
+        self.out_buf.extend_from_slice(&out);
+        let buf = std::mem::take(&mut self.out_buf);
+        let mut pos = self.out_pos;
+        let slice = &buf[pos..];
+        match Pin::new(&mut self.output).poll_write(cx, slice) {
+            Poll::Pending => {
+                self.out_buf = buf;
+                self.out_pos = pos;
+                Poll::Pending
+            }
+            Poll::Ready(Ok(w)) => {
+                pos += w;
+                self.write_size += w as u32;
+                if pos == buf.len() {
+                    self.out_pos = 0;
+                } else {
+                    self.out_buf = buf;
+                    self.out_pos = pos;
+                }
+                Poll::Ready(Ok(len))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.finished && !self.buffer.is_empty() {
+            let mut block = [0u8; 16];
+            block[..self.buffer.len()].copy_from_slice(&self.buffer);
+            {
+                let b = GenericArray::from_mut_slice(&mut block);
+                self.enc.encrypt_block_mut(b);
+            }
+            self.buffer.clear();
+            self.out_buf.extend_from_slice(&block);
+        }
+        if self.out_pos < self.out_buf.len() {
+            let buf = std::mem::take(&mut self.out_buf);
+            let mut pos = self.out_pos;
+            let slice = &buf[pos..];
+            match Pin::new(&mut self.output).poll_write(cx, slice) {
+                Poll::Pending => {
+                    self.out_buf = buf;
+                    self.out_pos = pos;
+                    return Poll::Pending;
+                }
+                Poll::Ready(Ok(w)) => {
+                    pos += w;
+                    self.write_size += w as u32;
+                    if pos == buf.len() {
+                        self.out_pos = 0;
+                    } else {
+                        self.out_buf = buf;
+                        self.out_pos = pos;
+                    }
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            }
+        }
+        Pin::new(&mut self.output).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.finished = true;
+        match self.as_mut().poll_flush(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Pin::new(&mut self.output).poll_close(cx),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        }
     }
 }
 

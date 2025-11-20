@@ -234,7 +234,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
                 false => Pin::new(w.as_mut().unwrap().as_mut()).poll_write(cx, buf),
             },
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => Poll::Ready(std::io::Write::write(w.as_mut(), buf)),
+            Encoder::Aes(w) => std::pin::Pin::new(w.as_mut()).poll_write(cx, buf),
         }
     }
 
@@ -259,7 +259,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_flush(cx),
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => Poll::Ready(std::io::Write::flush(w.as_mut())),
+            Encoder::Aes(w) => std::pin::Pin::new(w.as_mut()).poll_flush(cx),
         }
     }
 
@@ -305,10 +305,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Encoder<W> {
             #[cfg(feature = "zstd")]
             Encoder::Zstd(w) => Pin::new(w.as_mut().unwrap().as_mut()).poll_close(cx),
             #[cfg(feature = "aes256")]
-            Encoder::Aes(w) => {
-                let _ = std::io::Write::write(w.as_mut(), &[])?;
-                Poll::Ready(Ok(()))
-            }
+            Encoder::Aes(w) => std::pin::Pin::new(w.as_mut()).poll_close(cx),
         }
     }
 }

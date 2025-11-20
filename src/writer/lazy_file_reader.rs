@@ -1,13 +1,12 @@
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf, pin::Pin};
 
 use async_fs as afs;
-use async_io::block_on;
 use futures::io::AsyncRead;
-use futures_lite::AsyncReadExt;
 
 pub(crate) struct LazyFileReader {
     path: PathBuf,
     reader: Option<afs::File>,
+    opening: Option<Pin<Box<dyn Future<Output = std::io::Result<afs::File>>>>>,
     end: bool,
 }
 
@@ -16,6 +15,7 @@ impl LazyFileReader {
         Self {
             path,
             reader: None,
+            opening: None,
             end: false,
         }
     }
@@ -31,20 +31,33 @@ impl AsyncRead for LazyFileReader {
             return std::task::Poll::Ready(Ok(0));
         }
         if self.reader.is_none() {
-            match block_on(afs::File::open(&self.path)) {
-                Ok(f) => self.reader = Some(f),
-                Err(e) => return std::task::Poll::Ready(Err(e)),
+            if self.opening.is_none() {
+                let fut = afs::File::open(self.path.clone());
+                self.opening = Some(Box::pin(fut));
+            }
+            let fut = self.opening.as_mut().unwrap();
+            match fut.as_mut().poll(_cx) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Ok(f)) => {
+                    self.reader = Some(f);
+                    self.opening = None;
+                }
+                std::task::Poll::Ready(Err(e)) => {
+                    self.opening = None;
+                    return std::task::Poll::Ready(Err(e));
+                }
             }
         }
-        match block_on(self.reader.as_mut().unwrap().read(buf)) {
-            Ok(n) => {
+        let poll = std::pin::Pin::new(self.reader.as_mut().unwrap()).poll_read(_cx, buf);
+        match poll {
+            std::task::Poll::Ready(Ok(n)) => {
                 if n == 0 {
                     self.end = true;
                     self.reader = None;
                 }
                 std::task::Poll::Ready(Ok(n))
             }
-            Err(e) => std::task::Poll::Ready(Err(e)),
+            other => other,
         }
     }
 }
