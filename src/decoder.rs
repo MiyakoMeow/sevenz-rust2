@@ -55,7 +55,7 @@ pub enum Decoder<R: AsyncRead + Unpin> {
     Delta(Box<AsyncStdRead<DeltaReader<AsyncReadSeekAsStd<R>>>>),
     #[cfg(feature = "brotli")]
     /// Brotli 算法解码器。
-    Brotli(Box<AsyncStdRead<BrotliDecoder<R>>>),
+    Brotli(Box<BrotliDecoder<R>>),
     #[cfg(feature = "bzip2")]
     /// bzip2 算法解码器。
     Bzip2(Box<AsyncBzip2Decoder<BufReader<R>>>),
@@ -64,7 +64,7 @@ pub enum Decoder<R: AsyncRead + Unpin> {
     Deflate(Box<AsyncDeflateDecoder<BufReader<R>>>),
     #[cfg(feature = "lz4")]
     /// LZ4 算法解码器。
-    Lz4(Box<AsyncStdRead<Lz4Decoder<R>>>),
+    Lz4(Box<Lz4Decoder<R>>),
     #[cfg(feature = "zstd")]
     /// Zstd 算法解码器。
     Zstd(Box<AsyncZstdDecoder<BufReader<R>>>),
@@ -221,7 +221,7 @@ pub fn add_decoder<I: AsyncRead + Unpin>(
         #[cfg(feature = "brotli")]
         EncoderMethod::ID_BROTLI => {
             let de = BrotliDecoder::new(input, 4096)?;
-            Ok(Decoder::Brotli(Box::new(AsyncStdRead::new(de))))
+            Ok(Decoder::Brotli(Box::new(de)))
         }
         #[cfg(feature = "bzip2")]
         EncoderMethod::ID_BZIP2 => {
@@ -238,7 +238,7 @@ pub fn add_decoder<I: AsyncRead + Unpin>(
         #[cfg(feature = "lz4")]
         EncoderMethod::ID_LZ4 => {
             let de = Lz4Decoder::new(input)?;
-            Ok(Decoder::Lz4(Box::new(AsyncStdRead::new(de))))
+            Ok(Decoder::Lz4(Box::new(de)))
         }
         #[cfg(feature = "zstd")]
         EncoderMethod::ID_ZSTD => {

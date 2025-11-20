@@ -1,5 +1,4 @@
-use std::io::Cursor;
-use std::io::Read;
+use futures::io::Cursor;
 #[cfg(feature = "compress")]
 use std::io::{self, Write};
 
@@ -66,30 +65,37 @@ impl<R: AsyncRead + Unpin> BrotliDecoder<R> {
     }
 }
 
-impl<R: AsyncRead + Unpin> Read for BrotliDecoder<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl<R: AsyncRead + Unpin> futures::io::AsyncRead for BrotliDecoder<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         if let Some(inner) = &mut self.inner {
-            match async_io::block_on(AsyncReadExt::read(inner, buf)) {
-                Ok(0) => {
-                    let bufreader = inner.get_mut();
-                    let inner_reader = bufreader.get_mut();
-
+            let mut pin_inner = std::pin::Pin::new(inner);
+            match pin_inner.as_mut().poll_read(cx, buf) {
+                std::task::Poll::Ready(Ok(0)) => {
+                    let inner_reader: &mut InnerReader<R> = {
+                        let bufreader: &mut AsyncBufReader<InnerReader<R>> =
+                            pin_inner.get_mut().get_mut();
+                        bufreader.get_mut()
+                    };
                     if inner_reader.read_next_frame_header()? {
                         let reader = std::mem::replace(inner_reader, InnerReader::empty());
-                        let bufread = AsyncBufReader::new(reader);
+                        let bufread: AsyncBufReader<InnerReader<R>> = AsyncBufReader::new(reader);
                         let mut decompressor = AsyncBrotliDecoder::new(bufread);
-                        let result = async_io::block_on(AsyncReadExt::read(&mut decompressor, buf));
+                        let poll = std::pin::Pin::new(&mut decompressor).poll_read(cx, buf);
                         self.inner = Some(decompressor);
-                        result
+                        poll
                     } else {
                         self.inner = None;
-                        Ok(0)
+                        std::task::Poll::Ready(Ok(0))
                     }
                 }
-                result => result,
+                other => other,
             }
         } else {
-            Ok(0)
+            std::task::Poll::Ready(Ok(0))
         }
     }
 }
@@ -195,11 +201,15 @@ impl<R: AsyncRead + Unpin> futures::io::AsyncRead for InnerReader<R> {
                 header_finished,
             } => {
                 if !*header_finished {
-                    let bytes_read = std::io::Read::read(header_buffer, buf)?;
-                    if bytes_read > 0 {
-                        return std::task::Poll::Ready(Ok(bytes_read));
+                    let poll = std::pin::Pin::new(header_buffer).poll_read(cx, buf);
+                    if let std::task::Poll::Ready(Ok(bytes_read)) = poll {
+                        if bytes_read > 0 {
+                            return std::task::Poll::Ready(Ok(bytes_read));
+                        }
+                        *header_finished = true;
+                    } else {
+                        return poll;
                     }
-                    *header_finished = true;
                 }
                 std::pin::Pin::new(reader).poll_read(cx, buf)
             }
