@@ -3,7 +3,6 @@ use sevenz_rust2::*;
 #[cfg(feature = "compress")]
 use tempfile::*;
 #[cfg(feature = "compress")]
-#[cfg(feature = "compress")]
 #[test]
 fn compress_multi_files_solid() {
     let temp_dir = tempdir().unwrap();

@@ -479,7 +479,8 @@ impl Archive {
                     password,
                     MAX_MEM_LIMIT_KB,
                     thread_count,
-                )?;
+                )
+                .await?;
                 decoder = Box::new(next);
             }
             decoder
@@ -1406,7 +1407,8 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
                 password,
                 MAX_MEM_LIMIT_KB,
                 thread_count,
-            )?;
+            )
+            .await?;
             decoder = Box::new(next);
         }
         if has_crc {
@@ -1583,14 +1585,14 @@ impl<R: futures::io::AsyncRead + futures::io::AsyncSeek + Unpin> ArchiveReader<R
                 thread_count,
             )?;
 
-            let decoder = add_decoder(
+            let decoder = async_io::block_on(add_decoder(
                 input,
                 uncompressed_len,
                 coder,
                 password,
                 MAX_MEM_LIMIT_KB,
                 thread_count,
-            )?;
+            ))?;
             return Ok(Box::new(decoder));
         }
         Err(Error::unsupported(

@@ -19,9 +19,9 @@ pub(crate) struct Lz4Decoder<R: AsyncRead + Unpin> {
 }
 
 impl<R: AsyncRead + Unpin> Lz4Decoder<R> {
-    pub(crate) fn new(mut input: R) -> Result<Self, Error> {
+    pub(crate) async fn new(mut input: R) -> Result<Self, Error> {
         let mut header = [0u8; 12];
-        let header_read = match async_io::block_on(AsyncReadExt::read(&mut input, &mut header)) {
+        let header_read = match AsyncReadExt::read(&mut input, &mut header).await {
             Ok(n) if n >= 4 => n,
             Ok(_) => return Err(Error::other("Input too short")),
             Err(e) => return Err(e.into()),

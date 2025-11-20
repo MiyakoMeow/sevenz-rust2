@@ -240,7 +240,6 @@ impl<W> Aes256Sha256Encoder<W> {
 }
 
 #[cfg(feature = "compress")]
-#[cfg(feature = "compress")]
 impl<W: AsyncWrite + Unpin> AsyncWrite for Aes256Sha256Encoder<W> {
     fn poll_write(
         mut self: Pin<&mut Self>,

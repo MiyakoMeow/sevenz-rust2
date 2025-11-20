@@ -1,5 +1,4 @@
 #[cfg(feature = "util")]
-#[cfg(feature = "util")]
 use futures_lite::StreamExt;
 #[cfg(feature = "util")]
 use std::path::PathBuf;

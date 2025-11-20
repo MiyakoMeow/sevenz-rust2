@@ -124,7 +124,7 @@ impl<D: Read + Unpin> AsyncRead for AsyncStdRead<D> {
     }
 }
 
-pub fn add_decoder<I: AsyncRead + Unpin>(
+pub async fn add_decoder<I: AsyncRead + Unpin>(
     input: I,
     uncompressed_len: usize,
     coder: &Coder,
@@ -210,7 +210,7 @@ pub fn add_decoder<I: AsyncRead + Unpin>(
         }
         #[cfg(feature = "lz4")]
         EncoderMethod::ID_LZ4 => {
-            let de = Lz4Decoder::new(input)?;
+            let de = Lz4Decoder::new(input).await?;
             Ok(Decoder::Lz4(Box::new(de)))
         }
         #[cfg(feature = "zstd")]
